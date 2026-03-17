@@ -2,9 +2,10 @@
 #include "ui_pangolinauth.h"
 
 #include <QClipboard>
+#include <QDir>
+#include <QFileInfo>
 #include <QGuiApplication>
-#include <QJsonDocument>
-#include <QJsonObject>
+#include <QRegularExpression>
 #include <QStandardPaths>
 
 static constexpr int k_pollIntervalMs = 2000;
@@ -12,7 +13,14 @@ static constexpr int k_defaultExpirySeconds = 600;
 
 static QString pangolinBinaryPath()
 {
-    return QStandardPaths::findExecutable(QStringLiteral("pangolin"));
+    QString path = QStandardPaths::findExecutable(QStringLiteral("pangolin"));
+    if (path.isEmpty()) {
+        const QString localBin = QDir::homePath() + QStringLiteral("/.local/bin/pangolin");
+        if (QFileInfo(localBin).isExecutable()) {
+            path = localBin;
+        }
+    }
+    return path;
 }
 
 PangolinAuthWidget::PangolinAuthWidget(const NetworkManager::VpnSetting::Ptr &setting, QWidget *parent)
@@ -22,7 +30,8 @@ PangolinAuthWidget::PangolinAuthWidget(const NetworkManager::VpnSetting::Ptr &se
 {
     m_ui->setupUi(this);
 
-    m_ui->urlLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_ui->urlLabel->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::LinksAccessibleByMouse);
+    m_ui->urlLabel->setOpenExternalLinks(true);
     m_ui->codeLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_ui->getNewCodeBtn->setVisible(false);
     m_ui->progressBar->setVisible(false);
@@ -31,12 +40,18 @@ PangolinAuthWidget::PangolinAuthWidget(const NetworkManager::VpnSetting::Ptr &se
     m_ui->urlLabel->clear();
     m_ui->codeLabel->clear();
     m_ui->countdownLabel->clear();
-    m_ui->copyUrlBtn->setEnabled(false);
-    m_ui->copyCodeBtn->setEnabled(false);
+    m_ui->copyCodeBtn->setVisible(false);
+    m_ui->copyUrlBtn->setVisible(false);
 
     connect(m_ui->copyUrlBtn, &QPushButton::clicked, this, &PangolinAuthWidget::copyUrl);
     connect(m_ui->copyCodeBtn, &QPushButton::clicked, this, &PangolinAuthWidget::copyCode);
     connect(m_ui->getNewCodeBtn, &QPushButton::clicked, this, &PangolinAuthWidget::onGetNewCode);
+
+    // Get server URL from the VPN connection settings
+    if (setting && !setting->isNull()) {
+        const NMStringMap data = setting->data();
+        m_serverUrl = data.value(QStringLiteral("server-url"));
+    }
 
     checkAuthStatus();
 }
@@ -67,17 +82,11 @@ void PangolinAuthWidget::checkAuthStatus()
             return;
         }
 
-        const QByteArray output = process->readAllStandardOutput();
-        const QJsonDocument doc = QJsonDocument::fromJson(output);
-
-        if (doc.isObject() && doc.object().value(QStringLiteral("authenticated")).toBool()) {
-            setAuthenticatedState();
-        } else {
-            startDeviceCodeFlow();
-        }
+        // auth status returns 0 when authenticated
+        setAuthenticatedState();
     });
 
-    process->start(binary, {QStringLiteral("auth"), QStringLiteral("status"), QStringLiteral("--json")});
+    process->start(binary, {QStringLiteral("auth"), QStringLiteral("status")});
 }
 
 void PangolinAuthWidget::startDeviceCodeFlow()
@@ -94,48 +103,88 @@ void PangolinAuthWidget::startDeviceCodeFlow()
     stopAuthProcess();
 
     m_authProcess = new QProcess(this);
-    connect(m_authProcess, &QProcess::finished, this, &PangolinAuthWidget::onAuthProcessFinished);
+    m_remainingSeconds = k_defaultExpirySeconds;
+
+    // pangolin auth login outputs plain text to a TTY:
+    //   "First copy your one-time code: XXXX-XXXX"
+    //   "Press Enter to open https://... in your browser..."
+    // We use 'script' to provide a pseudo-TTY since QProcess doesn't have one.
+
+    QStringList scriptArgs;
+    scriptArgs << QStringLiteral("-qc");
+
+    // Build the pangolin command with server URL if available
+    QString pangolinCmd = binary + QStringLiteral(" auth login");
+    if (!m_serverUrl.isEmpty()) {
+        pangolinCmd += QStringLiteral(" ") + m_serverUrl;
+    }
+    scriptArgs << pangolinCmd;
+    scriptArgs << QStringLiteral("/dev/null");
 
     connect(m_authProcess, &QProcess::readyReadStandardOutput, this, [this]() {
-        const QByteArray output = m_authProcess->readAllStandardOutput();
-        const QJsonDocument doc = QJsonDocument::fromJson(output);
+        const QByteArray raw = m_authProcess->readAllStandardOutput();
+        const QString output = QString::fromUtf8(raw);
+        m_authBuffer += output;
 
-        if (!doc.isObject()) {
-            return;
-        }
-
-        const QJsonObject obj = doc.object();
-        m_verificationUrl = obj.value(QStringLiteral("verification_url")).toString();
-        m_deviceCode = obj.value(QStringLiteral("user_code")).toString();
-        m_remainingSeconds = obj.value(QStringLiteral("expires_in")).toInt(k_defaultExpirySeconds);
-
-        if (m_verificationUrl.isEmpty() || m_deviceCode.isEmpty()) {
-            return;
-        }
-
-        m_ui->statusLabel->setText(QStringLiteral("Authorize this device:"));
-        m_ui->urlLabel->setText(m_verificationUrl);
-        m_ui->codeLabel->setText(QStringLiteral("<span style=\"font-size: 18pt; font-weight: bold;\">%1</span>").arg(m_deviceCode));
-        m_ui->copyUrlBtn->setEnabled(true);
-        m_ui->copyCodeBtn->setEnabled(true);
-        m_ui->progressBar->setVisible(true);
-
-        updateCountdown();
-
-        if (!m_pollTimer) {
-            m_pollTimer = new QTimer(this);
-            connect(m_pollTimer, &QTimer::timeout, this, &PangolinAuthWidget::pollAuthStatus);
-        }
-        m_pollTimer->start(k_pollIntervalMs);
-
-        if (!m_countdownTimer) {
-            m_countdownTimer = new QTimer(this);
-            connect(m_countdownTimer, &QTimer::timeout, this, &PangolinAuthWidget::updateCountdown);
-        }
-        m_countdownTimer->start(1000);
+        parseAuthOutput();
     });
 
-    m_authProcess->start(binary, {QStringLiteral("auth"), QStringLiteral("login"), QStringLiteral("--json")});
+    connect(m_authProcess, &QProcess::finished, this, &PangolinAuthWidget::onAuthProcessFinished);
+
+    m_authProcess->start(QStringLiteral("script"), scriptArgs);
+}
+
+void PangolinAuthWidget::parseAuthOutput()
+{
+    // Look for: "one-time code: XXXX-XXXX"
+    static const QRegularExpression codeRe(QStringLiteral("one-time code:\\s*([A-Z0-9]{4}-[A-Z0-9]{4})"));
+    // Look for: "open https://... in your browser"
+    static const QRegularExpression urlRe(QStringLiteral("(https?://[^\\s]+)\\s+in your browser"));
+
+    const QRegularExpressionMatch codeMatch = codeRe.match(m_authBuffer);
+    const QRegularExpressionMatch urlMatch = urlRe.match(m_authBuffer);
+
+    if (codeMatch.hasMatch()) {
+        m_deviceCode = codeMatch.captured(1);
+    }
+    if (urlMatch.hasMatch()) {
+        m_verificationUrl = urlMatch.captured(1);
+    }
+
+    if (!m_deviceCode.isEmpty() && !m_verificationUrl.isEmpty()) {
+        showDeviceCode();
+    }
+}
+
+void PangolinAuthWidget::showDeviceCode()
+{
+    m_ui->statusLabel->setText(QStringLiteral("Authorize this device:"));
+
+    m_ui->urlLabel->setText(QStringLiteral("<a href=\"%1\" style=\"color: #4fc3f7;\">%1</a>").arg(m_verificationUrl));
+
+    m_ui->codeLabel->setText(
+        QStringLiteral("<span style=\"font-size: 24pt; font-weight: bold; letter-spacing: 4px;\">%1</span>")
+            .arg(m_deviceCode));
+
+    m_ui->copyCodeBtn->setVisible(true);
+    m_ui->copyCodeBtn->setEnabled(true);
+    m_ui->copyUrlBtn->setVisible(true);
+    m_ui->copyUrlBtn->setEnabled(true);
+    m_ui->progressBar->setVisible(true);
+
+    updateCountdown();
+
+    if (!m_pollTimer) {
+        m_pollTimer = new QTimer(this);
+        connect(m_pollTimer, &QTimer::timeout, this, &PangolinAuthWidget::pollAuthStatus);
+    }
+    m_pollTimer->start(k_pollIntervalMs);
+
+    if (!m_countdownTimer) {
+        m_countdownTimer = new QTimer(this);
+        connect(m_countdownTimer, &QTimer::timeout, this, &PangolinAuthWidget::updateCountdown);
+    }
+    m_countdownTimer->start(1000);
 }
 
 void PangolinAuthWidget::onAuthProcessFinished(int exitCode, QProcess::ExitStatus status)
@@ -160,15 +209,10 @@ void PangolinAuthWidget::pollAuthStatus()
             return;
         }
 
-        const QByteArray output = process->readAllStandardOutput();
-        const QJsonDocument doc = QJsonDocument::fromJson(output);
-
-        if (doc.isObject() && doc.object().value(QStringLiteral("authenticated")).toBool()) {
-            setAuthenticatedState();
-        }
+        setAuthenticatedState();
     });
 
-    process->start(binary, {QStringLiteral("auth"), QStringLiteral("status"), QStringLiteral("--json")});
+    process->start(binary, {QStringLiteral("auth"), QStringLiteral("status")});
 }
 
 void PangolinAuthWidget::updateCountdown()
@@ -198,6 +242,7 @@ void PangolinAuthWidget::onGetNewCode()
     stopTimers();
     m_deviceCode.clear();
     m_verificationUrl.clear();
+    m_authBuffer.clear();
     m_ui->urlLabel->clear();
     m_ui->codeLabel->clear();
     m_ui->countdownLabel->clear();
@@ -251,8 +296,8 @@ void PangolinAuthWidget::setAuthenticatedState()
     m_ui->countdownLabel->clear();
     m_ui->progressBar->setVisible(false);
     m_ui->getNewCodeBtn->setVisible(false);
-    m_ui->copyUrlBtn->setEnabled(false);
-    m_ui->copyCodeBtn->setEnabled(false);
+    m_ui->copyUrlBtn->setVisible(false);
+    m_ui->copyCodeBtn->setVisible(false);
 
     Q_EMIT settingChanged();
 }
@@ -261,9 +306,6 @@ QVariantMap PangolinAuthWidget::setting() const
 {
     NetworkManager::VpnSetting vpnSetting;
     vpnSetting.setServiceType(QStringLiteral("org.freedesktop.NetworkManager.pangolin"));
-
-    // Auth is handled by pangolin CLI, no secrets to pass back to NM
-    // from the device code flow. The pangolin binary stores its own tokens.
     return vpnSetting.toMap();
 }
 

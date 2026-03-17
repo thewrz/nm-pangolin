@@ -37,6 +37,8 @@ private:
     void stopTimers();
     void stopAuthProcess();
     void setAuthenticatedState();
+    void parseAuthOutput();
+    void showDeviceCode();
 
     Ui::PangolinAuthWidget *m_ui = nullptr;
     NetworkManager::VpnSetting::Ptr m_setting;
@@ -46,6 +48,8 @@ private:
     int m_remainingSeconds = 0;
     QString m_deviceCode;
     QString m_verificationUrl;
+    QString m_serverUrl;
+    QString m_authBuffer;
     bool m_authenticated = false;
 };
 

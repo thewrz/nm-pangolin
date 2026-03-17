@@ -79,10 +79,12 @@ def _user_env(user: str) -> dict[str, str]:
 def _run_as_user_cmd(user: str, pangolin_path: str, *args: str) -> list[str]:
     """Build a command list for executing pangolin as *user*.
 
-    Uses sudo -u which works in service contexts without PAM sessions,
-    unlike runuser which requires an active PAM session.
+    Runs pangolin directly with the user's environment variables set
+    (HOME, XDG_CONFIG_HOME) so it finds the right auth state.
+    The service runs as root, which has permission to read user config
+    files and create TUN interfaces.
     """
-    return ["sudo", "-n", "-u", user, "--", pangolin_path, *args]
+    return [pangolin_path, *args]
 
 
 def start(

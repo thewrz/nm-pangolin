@@ -35,6 +35,8 @@ PangolinWidget::PangolinWidget(const NetworkManager::VpnSetting::Ptr &setting, Q
     if (setting && !setting->isNull()) {
         loadConfig(setting);
     }
+
+    watchChangedSetting();
 }
 
 PangolinWidget::~PangolinWidget()

@@ -421,3 +421,7 @@ def main():
         pass
     finally:
         log.info("Service exiting")
+
+
+if __name__ == "__main__":
+    main()

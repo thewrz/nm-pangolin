@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libgirepository1.0-dev gcc pkg-config
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install dbus-python PyGObject pytest pytest-cov
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+      - name: Run tests with coverage
+        if: matrix.python-version == '3.12'
+        run: pytest tests/ --cov=src --cov-report=xml --cov-report=term
+
+      - name: Upload coverage
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  plasma-plugin:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install KDE/Qt6 build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            extra-cmake-modules \
+            qt6-base-dev \
+            libkf6coreaddons-dev \
+            libkf6i18n-dev \
+            libkf6widgetsaddons-dev \
+            libkf6networkmanagerqt-dev \
+            build-essential \
+            pkg-config
+
+      - name: Configure plasma plugin
+        run: |
+          cd plasma-plugin
+          mkdir -p build && cd build
+          cmake .. -DCMAKE_INSTALL_PREFIX=/usr 2>&1 || echo "::warning::CMake configure failed — plasma-nm headers may not be available in CI"
+
+      - name: Build plasma plugin
+        run: |
+          cd plasma-plugin/build
+          if [ -f Makefile ]; then
+            make -j$(nproc) 2>&1 || echo "::warning::Build failed — likely missing plasma-nm development headers"
+          else
+            echo "::warning::Skipping build — CMake configure did not produce Makefile"
+          fi
+
+  package:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create service tarball
+        run: |
+          mkdir -p dist/nm-pangolin-service
+          cp src/pangolin_wrapper.py dist/nm-pangolin-service/
+          cp src/config.py dist/nm-pangolin-service/
+          cp src/nm_pangolin_service.py dist/nm-pangolin-service/
+          cp src/__init__.py dist/nm-pangolin-service/
+          cp src/__main__.py dist/nm-pangolin-service/
+          cp conf/nm-pangolin.name dist/nm-pangolin-service/
+          cp conf/nm-pangolin-service.service dist/nm-pangolin-service/
+          cp conf/nm-pangolin.conf dist/nm-pangolin-service/
+          cp install.sh dist/nm-pangolin-service/
+          cp LICENSE dist/nm-pangolin-service/
+          cd dist && tar czf nm-pangolin-service.tar.gz nm-pangolin-service/
+
+      - name: Upload service artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nm-pangolin-service
+          path: dist/nm-pangolin-service.tar.gz
+
+      - name: Upload plasma plugin source
+        uses: actions/upload-artifact@v4
+        with:
+          name: plasma-plugin-source
+          path: plasma-plugin/

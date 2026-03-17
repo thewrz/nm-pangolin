@@ -2,3 +2,4 @@
 name=pangolin
 service=org.freedesktop.NetworkManager.pangolin
 program=/usr/lib/nm-pangolin/nm-pangolin-service
+properties=server-url,org,interface-name,mtu

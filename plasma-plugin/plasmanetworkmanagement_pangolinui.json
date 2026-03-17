@@ -1,0 +1,8 @@
+{
+    "KPlugin": {
+        "Name": "Pangolin VPN",
+        "Description": "Pangolin zero-trust VPN",
+        "ServiceTypes": ["PlasmaNetworkManagement/VpnUiPlugin"]
+    },
+    "X-NetworkManager-Services": "org.freedesktop.NetworkManager.pangolin"
+}

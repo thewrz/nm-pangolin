@@ -1,6 +1,8 @@
 #include "pangolinwidget.h"
 #include "ui_pangolin.h"
 
+#include <QDir>
+#include <QFileInfo>
 #include <QStandardPaths>
 
 #include <NetworkManagerQt/Setting>
@@ -115,10 +117,20 @@ bool PangolinWidget::isValid() const
 
 void PangolinWidget::checkPangolinBinary()
 {
-    const QString path = QStandardPaths::findExecutable(QStringLiteral("pangolin"));
+    // Check PATH first
+    QString path = QStandardPaths::findExecutable(QStringLiteral("pangolin"));
+
+    // Also check ~/.local/bin/ (common for user-local installs)
+    if (path.isEmpty()) {
+        const QString localBin = QDir::homePath() + QStringLiteral("/.local/bin/pangolin");
+        if (QFileInfo(localBin).isExecutable()) {
+            path = localBin;
+        }
+    }
+
     if (path.isEmpty()) {
         m_ui->warningLabel->setText(
-            QStringLiteral("<span style=\"color: red;\">Warning: pangolin binary not found in PATH</span>"));
+            QStringLiteral("<span style=\"color: red;\">Warning: pangolin binary not found in PATH or ~/.local/bin/</span>"));
         m_ui->warningLabel->setVisible(true);
     }
 }

@@ -13,17 +13,28 @@ import subprocess
 
 log = logging.getLogger(__name__)
 
-_FALLBACK_PATHS = ["/usr/bin/pangolin", "/usr/local/bin/pangolin"]
+_SYSTEM_PATHS = ["/usr/bin/pangolin", "/usr/local/bin/pangolin"]
 
 
 class PangolinNotFoundError(Exception):
     """Raised when the pangolin binary cannot be located."""
 
 
+def _user_local_paths() -> list[str]:
+    """Return ~/.local/bin/pangolin paths for all real (non-system) users."""
+    paths = []
+    for pw in pwd.getpwall():
+        if pw.pw_uid >= 1000 and pw.pw_dir and os.path.isdir(pw.pw_dir):
+            candidate = os.path.join(pw.pw_dir, ".local", "bin", "pangolin")
+            paths.append(candidate)
+    return paths
+
+
 def find_pangolin() -> str:
     """Locate the pangolin binary on the system.
 
-    Checks PATH via shutil.which, then falls back to well-known locations.
+    Checks PATH via shutil.which, then system locations, then
+    ~/.local/bin/ for all real users (common for user-local installs).
 
     Returns:
         Absolute path to the pangolin binary.
@@ -35,12 +46,13 @@ def find_pangolin() -> str:
     if found is not None:
         return os.path.realpath(found)
 
-    for path in _FALLBACK_PATHS:
+    for path in _SYSTEM_PATHS + _user_local_paths():
         if os.path.isfile(path) and os.access(path, os.X_OK):
+            log.info("Found pangolin at %s", path)
             return path
 
     raise PangolinNotFoundError(
-        "pangolin binary not found in PATH or standard locations"
+        "pangolin binary not found in PATH, system locations, or ~/.local/bin/"
     )
 
 

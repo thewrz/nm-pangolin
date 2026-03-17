@@ -35,13 +35,23 @@ def test_find_pangolin_via_which():
 
 def test_find_pangolin_fallback_paths():
     with patch("pangolin_wrapper.shutil.which", return_value=None), \
+         patch("pangolin_wrapper._user_local_paths", return_value=[]), \
          patch("pangolin_wrapper.os.path.isfile", side_effect=lambda p: p == "/usr/bin/pangolin"), \
          patch("pangolin_wrapper.os.access", return_value=True):
         assert wrapper.find_pangolin() == "/usr/bin/pangolin"
 
 
+def test_find_pangolin_user_local():
+    with patch("pangolin_wrapper.shutil.which", return_value=None), \
+         patch("pangolin_wrapper._user_local_paths", return_value=["/home/testuser/.local/bin/pangolin"]), \
+         patch("pangolin_wrapper.os.path.isfile", side_effect=lambda p: p == "/home/testuser/.local/bin/pangolin"), \
+         patch("pangolin_wrapper.os.access", return_value=True):
+        assert wrapper.find_pangolin() == "/home/testuser/.local/bin/pangolin"
+
+
 def test_find_pangolin_not_found():
     with patch("pangolin_wrapper.shutil.which", return_value=None), \
+         patch("pangolin_wrapper._user_local_paths", return_value=[]), \
          patch("pangolin_wrapper.os.path.isfile", return_value=False):
         with pytest.raises(PangolinNotFoundError):
             wrapper.find_pangolin()

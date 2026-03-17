@@ -109,10 +109,42 @@ prompt_install() {
 
 # --- Check pangolin CLI ---
 
-if ! command -v pangolin &>/dev/null; then
+PANGOLIN_PATH=""
+
+# Check system PATH
+if command -v pangolin &>/dev/null; then
+    PANGOLIN_PATH="$(command -v pangolin)"
+fi
+
+# Check common user-local installs
+if [[ -z "$PANGOLIN_PATH" ]]; then
+    for home_dir in /home/*; do
+        candidate="$home_dir/.local/bin/pangolin"
+        if [[ -x "$candidate" ]]; then
+            PANGOLIN_PATH="$candidate"
+            break
+        fi
+    done
+fi
+
+if [[ -z "$PANGOLIN_PATH" ]]; then
     echo "Warning: pangolin CLI not found."
     echo "The VPN service requires the pangolin binary to function."
     echo "Install it before attempting to connect (AUR: pangolin-bin, or manual install)."
+    echo ""
+elif [[ "$PANGOLIN_PATH" == /home/*/.local/bin/* ]]; then
+    echo "Found pangolin at $PANGOLIN_PATH (user-local install)."
+    echo "The NM service runs as root and needs pangolin in a system path."
+
+    if [[ ! -e /usr/local/bin/pangolin ]]; then
+        echo "Creating symlink: /usr/local/bin/pangolin -> $PANGOLIN_PATH"
+        ln -sf "$PANGOLIN_PATH" /usr/local/bin/pangolin
+    elif [[ -L /usr/local/bin/pangolin ]]; then
+        echo "Updating symlink: /usr/local/bin/pangolin -> $PANGOLIN_PATH"
+        ln -sf "$PANGOLIN_PATH" /usr/local/bin/pangolin
+    else
+        echo "Note: /usr/local/bin/pangolin already exists (not a symlink). Skipping."
+    fi
     echo ""
 fi
 

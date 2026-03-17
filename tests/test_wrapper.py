@@ -65,7 +65,7 @@ def test_start_basic(mock_pwnam):
 
         mock_popen.assert_called_once()
         cmd = mock_popen.call_args[0][0]
-        assert cmd == ["runuser", "-u", "testuser", "--", "/usr/bin/pangolin", "up", "--silent", "--no-override-dns"]
+        assert cmd == ["sudo", "-n", "-u", "testuser", "--", "/usr/bin/pangolin", "up", "--silent", "--no-override-dns"]
 
         env = mock_popen.call_args[1]["env"]
         assert env["HOME"] == "/home/testuser"
@@ -102,7 +102,7 @@ def test_stop_success(mock_pwnam):
         wrapper.stop("/usr/bin/pangolin", "testuser")
 
         cmd = mock_run.call_args[0][0]
-        assert cmd == ["runuser", "-u", "testuser", "--", "/usr/bin/pangolin", "down"]
+        assert cmd == ["sudo", "-n", "-u", "testuser", "--", "/usr/bin/pangolin", "down"]
 
 
 def test_stop_nonzero_exit(mock_pwnam):
@@ -234,8 +234,8 @@ def test_user_env_unknown_user():
             wrapper._user_env("nonexistent")
 
 
-# --- _runuser_cmd ---
+# --- _run_as_user_cmd ---
 
-def test_runuser_cmd():
-    cmd = wrapper._runuser_cmd("alice", "/usr/bin/pangolin", "up", "--silent")
-    assert cmd == ["runuser", "-u", "alice", "--", "/usr/bin/pangolin", "up", "--silent"]
+def test_run_as_user_cmd():
+    cmd = wrapper._run_as_user_cmd("alice", "/usr/bin/pangolin", "up", "--silent")
+    assert cmd == ["sudo", "-n", "-u", "alice", "--", "/usr/bin/pangolin", "up", "--silent"]

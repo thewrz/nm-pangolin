@@ -39,7 +39,8 @@ STATE_STARTED = 5
 STATE_STOPPING = 6
 STATE_STOPPED = 7
 
-# VPN Connection failure reasons
+# VPN Connection failure reasons (NM_VPN_PLUGIN_FAILURE_*)
+FAILURE_LOGIN_FAILED = 0
 FAILURE_CONNECT_FAILED = 1
 
 # Poll configuration
@@ -148,6 +149,16 @@ class NMPangolinService(dbus.service.Object):
         self._user = settings["user"]
         self._iface = settings["interface_name"]
         self._cancelling = False
+
+        # Check if the user is authenticated before attempting to connect.
+        # If not, tell NM we need secrets — this triggers the askUser()
+        # widget in the Qt plugin for device code enrollment.
+        if not wrapper.is_authenticated(self._pangolin_path, self._user):
+            log.info("User %s is not authenticated with pangolin", self._user)
+            self.Failure(dbus.UInt32(FAILURE_LOGIN_FAILED))
+            self._set_state(STATE_STOPPED)
+            self._schedule_idle_timeout()
+            return
 
         wrapper.cleanup_orphans(self._pangolin_path, self._iface)
 
@@ -267,7 +278,13 @@ class NMPangolinService(dbus.service.Object):
             return False
 
         rc = self._process.returncode
-        log.error("pangolin exited with code %d", rc)
+        stderr = ""
+        if self._process.stderr:
+            try:
+                stderr = self._process.stderr.read().decode("utf-8", errors="replace").strip()
+            except Exception:
+                pass
+        log.error("pangolin exited with code %d: %s", rc, stderr)
         self._process = None
         self._poll_source = None
         self.Failure(dbus.UInt32(FAILURE_CONNECT_FAILED))

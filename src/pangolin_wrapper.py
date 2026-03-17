@@ -76,9 +76,13 @@ def _user_env(user: str) -> dict[str, str]:
     }
 
 
-def _runuser_cmd(user: str, pangolin_path: str, *args: str) -> list[str]:
-    """Build a runuser command list for executing pangolin as *user*."""
-    return ["runuser", "-u", user, "--", pangolin_path, *args]
+def _run_as_user_cmd(user: str, pangolin_path: str, *args: str) -> list[str]:
+    """Build a command list for executing pangolin as *user*.
+
+    Uses sudo -u which works in service contexts without PAM sessions,
+    unlike runuser which requires an active PAM session.
+    """
+    return ["sudo", "-n", "-u", user, "--", pangolin_path, *args]
 
 
 def start(
@@ -101,7 +105,7 @@ def start(
     if iface is not None:
         args.extend(["--interface-name", iface])
 
-    cmd = _runuser_cmd(user, pangolin_path, *args)
+    cmd = _run_as_user_cmd(user, pangolin_path, *args)
     env = _user_env(user)
 
     log.info("Starting pangolin: %s", " ".join(cmd))
@@ -109,7 +113,7 @@ def start(
     return subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         env=env,
         close_fds=True,
     )
@@ -121,7 +125,7 @@ def stop(pangolin_path: str, user: str, timeout: int = 10) -> None:
     Raises subprocess.TimeoutExpired if the command does not finish
     within *timeout* seconds.
     """
-    cmd = _runuser_cmd(user, pangolin_path, "down")
+    cmd = _run_as_user_cmd(user, pangolin_path, "down")
     env = _user_env(user)
 
     log.info("Stopping pangolin: %s", " ".join(cmd))
@@ -140,6 +144,26 @@ def stop(pangolin_path: str, user: str, timeout: int = 10) -> None:
         log.warning("pangolin down exited %d: %s", result.returncode, stderr)
 
 
+def is_authenticated(pangolin_path: str, user: str, timeout: int = 5) -> bool:
+    """Check if the user is authenticated with pangolin."""
+    cmd = _run_as_user_cmd(user, pangolin_path, "auth", "status")
+    env = _user_env(user)
+
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            close_fds=True,
+            timeout=timeout,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log.warning("pangolin auth status check failed: %s", exc)
+        return False
+
+
 def status(
     pangolin_path: str, user: str, timeout: int = 5
 ) -> dict | None:
@@ -148,7 +172,7 @@ def status(
     Returns the parsed JSON dict, or None if the command fails or
     produces unparsable output.
     """
-    cmd = _runuser_cmd(user, pangolin_path, "status", "--json")
+    cmd = _run_as_user_cmd(user, pangolin_path, "status", "--json")
     env = _user_env(user)
 
     try:

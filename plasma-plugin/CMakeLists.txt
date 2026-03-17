@@ -56,10 +56,32 @@ target_link_libraries(plasmanetworkmanagement_pangolinui
     ${PLASMANM_EDITOR_LIB}
 )
 
+# Find the actual VPN plugin directory by locating where plasma-nm installed
+# its plugins. qtpaths and KDE_INSTALL_PLUGINDIR can both return stale paths.
+find_file(_existing_vpn_plugin
+    NAMES plasmanetworkmanagement_openvpnui.so
+          plasmanetworkmanagement_vpncui.so
+          plasmanetworkmanagement_pptpui.so
+    PATHS
+        /usr/lib/qt6/plugins/plasma/network/vpn
+        /usr/lib64/qt6/plugins/plasma/network/vpn
+        /usr/lib/qt/plugins/plasma/network/vpn
+        ${KDE_INSTALL_PLUGINDIR}/plasma/network/vpn
+    NO_DEFAULT_PATH
+)
+
+if(_existing_vpn_plugin)
+    get_filename_component(_vpn_plugin_dir "${_existing_vpn_plugin}" DIRECTORY)
+else()
+    set(_vpn_plugin_dir "${KDE_INSTALL_PLUGINDIR}/plasma/network/vpn")
+endif()
+
+message(STATUS "VPN plugin install dir: ${_vpn_plugin_dir}")
+
 install(TARGETS plasmanetworkmanagement_pangolinui
-    DESTINATION ${KDE_INSTALL_PLUGINDIR}/plasma/network/vpn
+    DESTINATION ${_vpn_plugin_dir}
 )
 
 install(FILES plasmanetworkmanagement_pangolinui.json
-    DESTINATION ${KDE_INSTALL_PLUGINDIR}/plasma/network/vpn
+    DESTINATION ${_vpn_plugin_dir}
 )

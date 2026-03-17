@@ -33,10 +33,11 @@ PangolinWidget::PangolinWidget(const NetworkManager::VpnSetting::Ptr &setting, Q
     // Must be called before the slotWidgetChanged connections below.
     watchChangedSetting();
 
-    // Connect the validity-driving field to slotWidgetChanged so that
-    // isValid() is re-evaluated and validChanged(bool) is emitted.
-    // This is what enables/disables the Save button.
-    connect(m_ui->serverUrl, &QLineEdit::textChanged, this, &SettingWidget::slotWidgetChanged);
+    // Trigger validity re-evaluation when the server URL changes.
+    // slotWidgetChanged() is protected, so we call it via lambda.
+    connect(m_ui->serverUrl, &QLineEdit::textChanged, this, [this]() {
+        slotWidgetChanged();
+    });
 }
 
 PangolinWidget::~PangolinWidget()

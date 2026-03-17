@@ -91,6 +91,16 @@
     </layout>
    </item>
    <item>
+    <widget class="QCheckBox" name="fullTunnel">
+     <property name="text">
+      <string>Route all traffic through VPN (disables split-tunnel)</string>
+     </property>
+     <property name="toolTip">
+      <string>When enabled, all internet traffic goes through the VPN. Requires the Pangolin server to advertise a default route (0.0.0.0/0). Recommended for untrusted networks (hotel wifi, coffee shops). IPv6 will be disabled to prevent leaks.</string>
+     </property>
+    </widget>
+   </item>
+   <item>
     <widget class="QGroupBox" name="machineCredentialsGroup">
      <property name="title">
       <string>Machine Credentials</string>

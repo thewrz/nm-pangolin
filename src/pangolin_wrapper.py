@@ -98,7 +98,7 @@ def start(
 
     Returns the Popen handle so the caller can monitor the process.
     """
-    args = ["up", "--silent"]
+    args = ["up", "--attach"]
 
     if no_override_dns:
         args.append("--override-dns=false")
@@ -110,14 +110,15 @@ def start(
     cmd = _run_as_user_cmd(user, pangolin_path, *args)
     env = _user_env(user)
 
-    log.info("Starting pangolin: %s", " ".join(cmd))
+    log.info("Starting pangolin: %s (env: HOME=%s USER=%s)", " ".join(cmd), env.get("HOME"), env.get("USER"))
 
     return subprocess.Popen(
         cmd,
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
         close_fds=True,
+        start_new_session=True,
     )
 
 
@@ -191,14 +192,16 @@ def status(
         return None
 
     if result.returncode != 0:
-        log.debug(
-            "pangolin status exited %d",
-            result.returncode,
-        )
+        log.debug("pangolin status exited %d", result.returncode)
+        return None
+
+    stdout = result.stdout.strip()
+    if not stdout or not stdout.startswith(b"{"):
+        log.debug("pangolin status: not connected yet")
         return None
 
     try:
-        return json.loads(result.stdout)
+        return json.loads(stdout)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         log.warning("Failed to parse pangolin status JSON: %s", exc)
         return None

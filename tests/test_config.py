@@ -49,7 +49,26 @@ def test_parse_connection_valid(mock_pwnam):
     assert result["org"] == "myorg"
     assert result["interface_name"] == "tun0"
     assert result["mtu"] == 1400
+    assert result["full_tunnel"] is False
     assert result["user"] == "testuser"
+
+
+def test_parse_connection_full_tunnel(mock_pwnam):
+    conn = _make_connection(
+        data={"server-url": "https://vpn.example.com", "full-tunnel": "true"},
+        conn={"permissions": ["user:testuser:"]},
+    )
+    result = parse_connection(conn)
+    assert result["full_tunnel"] is True
+
+
+def test_parse_connection_full_tunnel_false(mock_pwnam):
+    conn = _make_connection(
+        data={"server-url": "https://vpn.example.com", "full-tunnel": "false"},
+        conn={"permissions": ["user:testuser:"]},
+    )
+    result = parse_connection(conn)
+    assert result["full_tunnel"] is False
 
 
 def test_parse_connection_minimal(mock_pwnam):
@@ -62,6 +81,7 @@ def test_parse_connection_minimal(mock_pwnam):
     assert result["org"] is None
     assert result["interface_name"] == "pangolin"
     assert result["mtu"] is None
+    assert result["full_tunnel"] is False
 
 
 def test_parse_connection_missing_server_url(mock_pwnam):

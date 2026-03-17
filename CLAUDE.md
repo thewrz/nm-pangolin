@@ -33,9 +33,9 @@ tests/
 We implement `org.freedesktop.NetworkManager.VPN.Plugin` at path `/org/freedesktop/NetworkManager/VPN/Plugin`:
 
 ### Required Methods
-- `Connect(a{sv} connection)` — NM calls this to start VPN. We run `pangolin up --silent`.
-- `Disconnect()` — NM calls this to stop VPN. We run `pangolin down`.
-- `NeedSecrets(a{sv} connection) -> s` — Return empty string (pangolin handles its own auth).
+- `Connect(a{sv} connection)` — NM calls this to start VPN. We run `pangolin up --attach`.
+- `Disconnect()` — NM calls this to stop VPN. We kill the attach-mode process.
+- `NeedSecrets(a{sv} connection) -> s` — Return `auth-token` if not authenticated, empty string if auth is done.
 
 ### Required Signals
 - `StateChanged(u state)` — Emit when state changes (3=started, 4=stopping, 5=stopped, 6=failed)
@@ -67,7 +67,8 @@ pangolin status [--json]
 - Auth state stored in `~/.config/pangolin/accounts.json`
 - Creates a `pangolin` TUN interface
 - Runs as the invoking user (not root by default)
-- `--silent` disables TUI, required for daemon use
+- `--silent` disables TUI in detached mode (NOT compatible with `--attach`)
+- `--attach` runs in foreground mode (process stays alive as tunnel) — this is what the NM service uses
 
 ## Development Guidelines
 
@@ -79,9 +80,9 @@ pangolin status [--json]
 
 ## Permissions / Security
 
-- The D-Bus service runs as root (NM launches it)
-- `pangolin` CLI runs as the connecting user — use `su`/`runuser` from the service
-- D-Bus policy file must restrict who can call our methods (only NM)
+- The D-Bus service runs as root (NM launches it via D-Bus activation)
+- `pangolin` CLI runs as root with the connecting user's HOME/XDG_CONFIG_HOME env vars so it finds the right auth state
+- D-Bus policy file restricts who can call our methods (only root/NM)
 
 ## Testing
 
@@ -100,8 +101,12 @@ journalctl -u NetworkManager -f  # Watch for our service logs
 
 ## Common Gotchas
 
-- NM expects the VPN service to emit `Ip4Config` signal after successful connect, or it considers the connection failed
-- The `.name` file `service` field must exactly match the D-Bus service name
-- NM will kill the service process if it doesn't respond within a timeout
-- `pangolin up` in detached mode returns immediately but the tunnel isn't ready — poll `pangolin status --json` for connected state
-- DNS: pangolin uses `--override-dns` by default, which writes resolv conf. NM also manages DNS. These will fight. Need to either disable pangolin's DNS override and let NM handle it, or pass pangolin's DNS config back to NM via the Ip4Config signal.
+- **Use `--attach` not `--silent`**: Detached mode (`--silent`) spawns a background daemon that dies silently in the D-Bus service context. `--attach` keeps the process as the tunnel — killing it tears down cleanly.
+- NM expects the VPN service to emit `Ip4Config` signal after successful connect, or it considers the connection failed.
+- **Ip4Config must include a gateway**: NM rejects VPN connections with gateway=0. Use the pangolin peer endpoint IP as the gateway.
+- **Split-tunnel: set `never-default`**: Pangolin routes specific subnets, not all traffic. Without `never-default=true` in Ip4Config (and `ipv4.never-default yes` on the connection), NM makes the VPN the default route, breaking internet.
+- **Interface race condition**: `pangolin status --json` reports "connected" before the TUN interface exists. The service polls for the interface after status reports connected.
+- `pangolin status --json` returns non-JSON text ("No client is currently running") with exit code 0 when no client is running. Check for JSON before parsing.
+- The `.name` file `service` field must exactly match the D-Bus service name.
+- NM will kill the service process if it doesn't respond within a timeout (~60s).
+- DNS: we pass `--override-dns=false` so pangolin doesn't write resolv.conf. NM manages DNS from the Ip4Config signal.

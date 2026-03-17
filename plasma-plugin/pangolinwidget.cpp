@@ -11,6 +11,7 @@ static const QString k_serverUrl = QStringLiteral("server-url");
 static const QString k_org = QStringLiteral("org");
 static const QString k_interfaceName = QStringLiteral("interface-name");
 static const QString k_mtu = QStringLiteral("mtu");
+static const QString k_fullTunnel = QStringLiteral("full-tunnel");
 static const QString k_olmId = QStringLiteral("olm-id");
 static const QString k_olmSecret = QStringLiteral("olm-secret");
 
@@ -57,6 +58,8 @@ void PangolinWidget::loadConfig(const NetworkManager::Setting::Ptr &setting)
     const int mtu = data.value(k_mtu, QStringLiteral("0")).toInt();
     m_ui->mtu->setValue(mtu);
 
+    m_ui->fullTunnel->setChecked(data.value(k_fullTunnel) == QLatin1String("true"));
+
     loadSecrets(setting);
 }
 
@@ -93,6 +96,10 @@ QVariantMap PangolinWidget::setting() const
     const int mtu = m_ui->mtu->value();
     if (mtu > 0) {
         data.insert(k_mtu, QString::number(mtu));
+    }
+
+    if (m_ui->fullTunnel->isChecked()) {
+        data.insert(k_fullTunnel, QStringLiteral("true"));
     }
 
     vpnSetting.setData(data);

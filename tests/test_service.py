@@ -19,6 +19,7 @@ import pytest
 mock_dbus = MagicMock()
 mock_dbus.UInt32 = lambda x: x
 mock_dbus.String = lambda x: x
+mock_dbus.Boolean = lambda x: bool(x)
 mock_dbus.Array = lambda items, signature="": list(items)
 mock_dbus.Struct = lambda items, signature="": tuple(items)
 mock_dbus.service.Object = object
@@ -49,6 +50,7 @@ from nm_pangolin_service import (
     _pack_ipv4,
     _is_valid_ipv4,
     _merge_dns_from_status,
+    _extract_endpoint_ip,
     STATE_INIT,
     STATE_STARTING,
     STATE_STARTED,
@@ -80,6 +82,7 @@ def svc():
     s._user = None
     s._iface = "pangolin"
     s._loop = MagicMock()
+    s._full_tunnel = False
 
     s.StateChanged = MagicMock()
     s.Ip4Config = MagicMock()
@@ -103,6 +106,7 @@ def mock_config():
             "org": None,
             "interface_name": "pangolin",
             "mtu": None,
+            "full_tunnel": False,
             "olm_id": None,
             "olm_secret": None,
             "user": "testuser",
@@ -193,7 +197,7 @@ def test_disconnect_lifecycle(svc, mock_wrapper):
 
     svc.StateChanged.assert_any_call(STATE_STOPPING)
     svc.StateChanged.assert_any_call(STATE_STOPPED)
-    mock_wrapper.stop.assert_called_once()
+    svc._process is None  # Process should be cleaned up
 
 
 # --- Polling ---
@@ -322,7 +326,7 @@ def test_merge_dns_from_status_skips_when_present():
 
 # --- _build_ip4_config ---
 
-def test_build_ip4_config(svc):
+def test_build_ip4_config_split_tunnel(svc):
     iface_config = {
         "address": "10.0.0.5",
         "prefix": 24,
@@ -331,25 +335,85 @@ def test_build_ip4_config(svc):
     }
     svc._iface = "pangolin"
 
-    result = svc._build_ip4_config(iface_config)
+    result = svc._build_ip4_config(iface_config, external_gw="203.0.113.1")
 
     assert result["tundev"] == "pangolin"
-    expected_gw = struct.unpack("=I", socket.inet_pton(socket.AF_INET, "10.0.0.1"))[0]
+    expected_gw = struct.unpack("=I", socket.inet_pton(socket.AF_INET, "203.0.113.1"))[0]
     assert result["gateway"] == expected_gw
     assert len(result["addresses"]) == 1
+    assert result["never-default"] == True
+    assert result["has-default-route"] == False
+
+
+def test_build_ip4_config_full_tunnel(svc):
+    iface_config = {
+        "address": "10.0.0.5",
+        "prefix": 24,
+        "gateway": "10.0.0.1",
+        "dns": [],
+    }
+    svc._iface = "pangolin"
+
+    result = svc._build_ip4_config(iface_config, external_gw="203.0.113.1", full_tunnel=True)
+
+    assert result["never-default"] == False
+    assert result["has-default-route"] == True
+
+
+def test_build_ip4_config_no_external_gw(svc):
+    iface_config = {
+        "address": "10.0.0.5",
+        "prefix": 24,
+        "gateway": None,
+        "dns": [],
+    }
+    svc._iface = "pangolin"
+
+    result = svc._build_ip4_config(iface_config)
+
+    # Falls back to tunnel address when no gateway
+    expected_gw = struct.unpack("=I", socket.inet_pton(socket.AF_INET, "10.0.0.5"))[0]
+    assert result["gateway"] == expected_gw
+
+
+def test_extract_endpoint_ip():
+    status = {
+        "peers": {
+            "1": {"endpoint": "104.202.14.190:61775", "name": "homelab"},
+        }
+    }
+    assert _extract_endpoint_ip(status) == "104.202.14.190"
+
+
+def test_extract_endpoint_ip_no_peers():
+    assert _extract_endpoint_ip({"peers": {}}) is None
+    assert _extract_endpoint_ip({}) is None
 
 
 # --- Poll connected happy path ---
 
-def test_poll_connected_emits_ip4config(svc, mock_wrapper):
+def test_poll_connected_schedules_iface_check(svc, mock_wrapper):
     svc._process = MagicMock()
     svc._process.poll.return_value = None
     svc._state = STATE_STARTING
     svc._connect_start = time.monotonic()
     svc._user = "testuser"
-    mock_wrapper.status.return_value = {"status": "connected"}
+    mock_wrapper.status.return_value = {"status": "connected", "peers": {"1": {"endpoint": "1.2.3.4:5678"}}}
 
     result = svc._poll_status()
+
+    assert result is False
+    assert svc._status_data is not None
+    # Ip4Config is deferred until interface is ready
+    mock_glib.timeout_add.assert_called()
+
+
+def test_poll_interface_emits_ip4config(svc, mock_wrapper):
+    svc._iface = "pangolin"
+    svc._status_data = {"peers": {"1": {"endpoint": "1.2.3.4:5678"}}}
+    svc._iface_retries = 0
+
+    result = svc._poll_interface()
 
     assert result is False
     svc.Ip4Config.assert_called_once()

@@ -67,6 +67,9 @@ class NMPangolinService(dbus.service.Object):
         self._user = None
         self._iface = "pangolin"
         self._loop = None
+        self._status_data = None
+        self._iface_retries = 0
+        self._full_tunnel = False
 
         log.info("Service initialized, pangolin at %s", pangolin_path)
 
@@ -148,6 +151,7 @@ class NMPangolinService(dbus.service.Object):
 
         self._user = settings["user"]
         self._iface = settings["interface_name"]
+        self._full_tunnel = settings.get("full_tunnel", False)
         self._cancelling = False
 
         wrapper.cleanup_orphans(self._pangolin_path, self._iface)
@@ -181,19 +185,17 @@ class NMPangolinService(dbus.service.Object):
 
     @dbus.service.method(VPN_IFACE, in_signature="", out_signature="")
     def Disconnect(self):
-        """Stop VPN connection. Called by NetworkManager."""
+        """Stop VPN connection. Called by NetworkManager.
+
+        In --attach mode, killing the process tears down the tunnel.
+        No separate 'pangolin down' needed.
+        """
         self._cancelling = True
         self._cancel_poll()
 
         self._set_state(STATE_STOPPING)
 
         self._kill_process()
-
-        if self._user is not None:
-            try:
-                wrapper.stop(self._pangolin_path, self._user)
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                log.warning("pangolin down failed: %s", exc)
 
         self._user = None
         self._set_state(STATE_STOPPED)
@@ -286,11 +288,10 @@ class NMPangolinService(dbus.service.Object):
         return self._check_pangolin_status()
 
     def _check_process_exited(self) -> bool:
-        """Check if the pangolin process exited. Returns True to stop polling only on failure.
+        """Check if the pangolin process exited. Returns True to stop polling.
 
-        pangolin up --silent in detached mode exits 0 immediately after
-        spawning the background daemon. That's success — keep polling
-        for the tunnel to come up.
+        In --attach mode, pangolin runs as the foreground process.
+        Any exit during the connect phase is a failure.
         """
         if self._process is None or self._process.poll() is None:
             return False
@@ -303,10 +304,6 @@ class NMPangolinService(dbus.service.Object):
             except Exception:
                 pass
         self._process = None
-
-        if rc == 0:
-            log.info("pangolin up exited 0 (detached mode), waiting for tunnel")
-            return False  # Keep polling — daemon is running in background
 
         log.error("pangolin exited with code %d: %s", rc, stderr)
         self._poll_source = None
@@ -339,38 +336,71 @@ class NMPangolinService(dbus.service.Object):
         if not connected:
             return True
 
-        log.info("Pangolin connected")
+        log.info("Pangolin connected, waiting for interface")
         self._poll_source = None
+        self._status_data = st
+
+        # Interface may not be ready yet — poll for it
+        self._iface_retries = 0
+        self._poll_source = GLib.timeout_add(POLL_INTERVAL_MS, self._poll_interface)
+        return False
+
+    def _poll_interface(self) -> bool:
+        """Poll for the TUN interface to become available after connect."""
+        MAX_IFACE_RETRIES = 20  # 10 seconds at 500ms
+
+        self._iface_retries += 1
 
         try:
             iface_config = wrapper.get_interface_config(self._iface)
-            ip4 = self._build_ip4_config(iface_config)
-        except RuntimeError as exc:
-            log.error("Failed to read interface config: %s", exc)
-            self._kill_process()
-            self.Failure(dbus.UInt32(FAILURE_CONNECT_FAILED))
-            self._set_state(STATE_STOPPED)
-            self._schedule_idle_timeout()
-            return False
+        except RuntimeError:
+            if self._iface_retries >= MAX_IFACE_RETRIES:
+                log.error("Interface %s not ready after %d retries", self._iface, self._iface_retries)
+                self._poll_source = None
+                self._kill_process()
+                self.Failure(dbus.UInt32(FAILURE_CONNECT_FAILED))
+                self._set_state(STATE_STOPPED)
+                self._schedule_idle_timeout()
+                return False
+            return True  # Keep polling
 
-        ip4 = _merge_dns_from_status(ip4, st)
+        self._poll_source = None
+        log.info("Interface %s ready", self._iface)
+
+        external_gw = _extract_endpoint_ip(self._status_data)
+        ip4 = self._build_ip4_config(iface_config, external_gw, self._full_tunnel)
+        ip4 = _merge_dns_from_status(ip4, self._status_data)
+        self._status_data = None
 
         self.Ip4Config(ip4)
         self._set_state(STATE_STARTED)
         return False
 
-    def _build_ip4_config(self, iface_config: dict) -> dict:
-        """Build NM Ip4Config D-Bus dict from parsed interface config."""
+    def _build_ip4_config(self, iface_config: dict, external_gw: str | None = None, full_tunnel: bool = False) -> dict:
+        """Build NM Ip4Config D-Bus dict from parsed interface config.
+
+        Args:
+            iface_config: Parsed interface config from ip addr/route.
+            external_gw: VPN server's external IP (from pangolin endpoint).
+                NM requires this to route encapsulated traffic correctly.
+            full_tunnel: If True, make VPN the default route (route all traffic).
+        """
         addr = iface_config["address"]
         prefix = iface_config["prefix"]
-        gateway = iface_config.get("gateway")
 
         addr_packed = _pack_ipv4(addr)
-        gw_packed = _pack_ipv4(gateway) if gateway else dbus.UInt32(0)
+
+        # NM needs the external VPN server IP as the gateway so it can
+        # create a host route to the server via the physical interface.
+        # Fall back to tunnel address if no external gateway is available.
+        gw_str = external_gw or iface_config.get("gateway") or addr
+        gw_packed = _pack_ipv4(gw_str)
 
         ip4 = {
             "tundev": dbus.String(self._iface),
             "gateway": gw_packed,
+            "has-default-route": dbus.Boolean(full_tunnel),
+            "never-default": dbus.Boolean(not full_tunnel),
             "addresses": dbus.Array(
                 [dbus.Struct(
                     (addr_packed, dbus.UInt32(prefix), gw_packed),
@@ -388,6 +418,21 @@ class NMPangolinService(dbus.service.Object):
             )
 
         return ip4
+
+
+def _extract_endpoint_ip(status_data: dict) -> str | None:
+    """Extract the first peer endpoint IP from pangolin status JSON.
+
+    The endpoint is in format "IP:PORT". Returns just the IP, or None.
+    """
+    peers = status_data.get("peers", {})
+    for peer in peers.values():
+        endpoint = peer.get("endpoint", "")
+        if ":" in endpoint:
+            ip = endpoint.rsplit(":", 1)[0]
+            if _is_valid_ipv4(ip):
+                return ip
+    return None
 
 
 def _merge_dns_from_status(ip4: dict, status_data: dict) -> dict:

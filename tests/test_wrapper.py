@@ -65,7 +65,7 @@ def test_start_basic(mock_pwnam):
 
         mock_popen.assert_called_once()
         cmd = mock_popen.call_args[0][0]
-        assert cmd == ["/usr/bin/pangolin", "up", "--silent", "--override-dns=false"]
+        assert cmd == ["/usr/bin/pangolin", "up", "--attach", "--override-dns=false"]
 
         env = mock_popen.call_args[1]["env"]
         assert env["HOME"] == "/home/testuser"
@@ -91,6 +91,7 @@ def test_start_without_dns_override(mock_pwnam):
 
         cmd = mock_popen.call_args[0][0]
         assert "--override-dns=false" not in cmd
+        assert "--attach" in cmd
 
 
 # --- stop ---
@@ -136,10 +137,26 @@ def test_status_timeout(mock_pwnam):
         assert wrapper.status("/usr/bin/pangolin", "testuser") is None
 
 
+def test_status_not_running(mock_pwnam):
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = b"No client is currently running\n"
+    with patch("pangolin_wrapper.subprocess.run", return_value=mock_result):
+        assert wrapper.status("/usr/bin/pangolin", "testuser") is None
+
+
+def test_status_empty_stdout(mock_pwnam):
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = b""
+    with patch("pangolin_wrapper.subprocess.run", return_value=mock_result):
+        assert wrapper.status("/usr/bin/pangolin", "testuser") is None
+
+
 def test_status_bad_json(mock_pwnam):
     mock_result = MagicMock()
     mock_result.returncode = 0
-    mock_result.stdout = b"not json at all"
+    mock_result.stdout = b"{bad json"
     with patch("pangolin_wrapper.subprocess.run", return_value=mock_result):
         assert wrapper.status("/usr/bin/pangolin", "testuser") is None
 

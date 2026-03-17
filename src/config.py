@@ -61,7 +61,7 @@ def parse_connection(connection: dict[str, Any]) -> dict[str, Any]:
 
     Returns:
         A new dict with keys: server_url, org, interface_name, mtu,
-        olm_id, olm_secret, user.
+        full_tunnel, olm_id, olm_secret, user.
 
     Raises:
         ConfigError: For missing required fields or invalid values.
@@ -102,6 +102,8 @@ def parse_connection(connection: dict[str, Any]) -> dict[str, Any]:
     if olm_secret is not None:
         olm_secret = validate_string(olm_secret, "olm-secret")
 
+    full_tunnel = data.get("full-tunnel", "").lower() == "true"
+
     user = get_connecting_user(connection)
 
     return {
@@ -109,6 +111,7 @@ def parse_connection(connection: dict[str, Any]) -> dict[str, Any]:
         "org": org,
         "interface_name": interface_name,
         "mtu": mtu,
+        "full_tunnel": full_tunnel,
         "olm_id": olm_id,
         "olm_secret": olm_secret,
         "user": user,

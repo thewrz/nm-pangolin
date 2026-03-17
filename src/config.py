@@ -5,6 +5,7 @@ reach subprocess calls.  Provides sensible defaults for optional fields.
 """
 
 import logging
+import os
 import pwd
 import re
 from typing import Any
@@ -147,6 +148,20 @@ def get_connecting_user(connection: dict[str, Any]) -> str:
             return pw.pw_name
         except (KeyError, ValueError) as exc:
             raise ConfigError(f"Cannot resolve UID {uid}") from exc
+
+    # Fallback: find the first real user with pangolin auth configured.
+    # This handles "All users may connect" connections where NM doesn't
+    # store per-user permissions.
+    for pw in pwd.getpwall():
+        if pw.pw_uid >= 1000 and pw.pw_dir:
+            pangolin_config = os.path.join(pw.pw_dir, ".config", "pangolin")
+            if os.path.isdir(pangolin_config):
+                log.info(
+                    "No user in connection properties, using %s "
+                    "(has pangolin config)",
+                    pw.pw_name,
+                )
+                return pw.pw_name
 
     raise ConfigError(
         "Cannot determine connecting user from connection properties"

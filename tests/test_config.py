@@ -155,10 +155,27 @@ def test_get_connecting_user_from_uid():
         assert get_connecting_user(conn) == "charlie"
 
 
+def test_get_connecting_user_fallback_pangolin_config():
+    pw = MagicMock()
+    pw.pw_uid = 1000
+    pw.pw_dir = "/home/testuser"
+    pw.pw_name = "testuser"
+    with patch("config.pwd.getpwall", return_value=[pw]), \
+         patch("config.os.path.isdir", return_value=True):
+        conn = {"connection": {}}
+        assert get_connecting_user(conn) == "testuser"
+
+
 def test_get_connecting_user_missing():
-    conn = {"connection": {}}
-    with pytest.raises(ConfigError, match="Cannot determine connecting user"):
-        get_connecting_user(conn)
+    pw = MagicMock()
+    pw.pw_uid = 1000
+    pw.pw_dir = "/home/testuser"
+    pw.pw_name = "testuser"
+    with patch("config.pwd.getpwall", return_value=[pw]), \
+         patch("config.os.path.isdir", return_value=False):
+        conn = {"connection": {}}
+        with pytest.raises(ConfigError, match="Cannot determine connecting user"):
+            get_connecting_user(conn)
 
 
 def test_get_connecting_user_nonexistent():

@@ -79,7 +79,7 @@ service_deps() {
 
 plasma_deps() {
     case "$PKG_MANAGER" in
-        pacman)  echo "plasma-nm extra-cmake-modules qt6-base kf6-networkmanager-qt kf6-coreaddons kf6-i18n kf6-widgetsaddons cmake gcc make" ;;
+        pacman)  echo "plasma-nm extra-cmake-modules qt6-base networkmanager-qt kcoreaddons ki18n kwidgetsaddons cmake gcc make" ;;
         apt)     echo "cmake extra-cmake-modules qt6-base-dev build-essential libgl-dev libkf6networkmanagerqt-dev libkf6coreaddons-dev libkf6i18n-dev libkf6kwidgetsaddons-dev" ;;
         dnf)     echo "cmake extra-cmake-modules qt6-qtbase-devel gcc-c++ kf6-networkmanager-qt-devel kf6-kcoreaddons-devel kf6-ki18n-devel kf6-kwidgetsaddons-devel plasma-nm-devel" ;;
         zypper)  echo "cmake extra-cmake-modules qt6-base-devel gcc-c++ kf6-networkmanager-qt-devel kf6-kcoreaddons-devel kf6-ki18n-devel kf6-kwidgetsaddons-devel" ;;

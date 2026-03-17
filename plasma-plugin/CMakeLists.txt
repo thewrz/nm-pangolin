@@ -15,11 +15,13 @@ find_package(Qt6 REQUIRED COMPONENTS Core DBus Widgets)
 find_package(KF6 REQUIRED COMPONENTS CoreAddons I18n WidgetsAddons)
 find_package(KF6NetworkManagerQt REQUIRED)
 
-# NOTE: The plasma-nm VPN UI plugin headers may come from different sources
-# depending on the distribution. The find_package name and target may need
-# adjustment. Check your plasma-nm development package for the actual
-# CMake config file name (e.g., PlasmaNetworkManagerQt, plasma-nm, etc.).
-find_package(PlasmaNetworkManagerQt REQUIRED)
+# plasma-nm does not ship development headers or cmake configs.
+# We vendor the required base class headers (LGPL) in libs/editor/
+# and link against the installed libplasmanm_editor.so at runtime.
+find_library(PLASMANM_EDITOR_LIB plasmanm_editor
+    PATHS /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu
+    REQUIRED
+)
 
 set(pangolin_SRCS
     pangolin.cpp
@@ -39,6 +41,10 @@ add_library(plasmanetworkmanagement_pangolinui MODULE
     ${pangolin_UI_SRCS}
 )
 
+target_include_directories(plasmanetworkmanagement_pangolinui PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/libs/editor
+)
+
 target_link_libraries(plasmanetworkmanagement_pangolinui
     Qt6::Core
     Qt6::DBus
@@ -47,7 +53,7 @@ target_link_libraries(plasmanetworkmanagement_pangolinui
     KF6::I18n
     KF6::WidgetsAddons
     KF6::NetworkManagerQt
-    PlasmaNetworkManagerQt::plasmanm_internal
+    ${PLASMANM_EDITOR_LIB}
 )
 
 install(TARGETS plasmanetworkmanagement_pangolinui

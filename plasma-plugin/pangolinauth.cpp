@@ -311,6 +311,14 @@ QVariantMap PangolinAuthWidget::setting() const
 {
     NetworkManager::VpnSetting vpnSetting;
     vpnSetting.setServiceType(QStringLiteral("org.freedesktop.NetworkManager.pangolin"));
+
+    // NM expects the secret that NeedSecrets() requested.
+    // Pangolin stores its own tokens — we just provide a dummy value
+    // to satisfy NM's secret requirement so it proceeds to Connect().
+    NMStringMap secrets;
+    secrets.insert(QStringLiteral("auth-token"), QStringLiteral("pangolin-authenticated"));
+    vpnSetting.setSecrets(secrets);
+
     return vpnSetting.toMap();
 }
 

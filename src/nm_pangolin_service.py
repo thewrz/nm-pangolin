@@ -286,7 +286,12 @@ class NMPangolinService(dbus.service.Object):
         return self._check_pangolin_status()
 
     def _check_process_exited(self) -> bool:
-        """Check if the pangolin process exited unexpectedly. Returns True if exited."""
+        """Check if the pangolin process exited. Returns True to stop polling only on failure.
+
+        pangolin up --silent in detached mode exits 0 immediately after
+        spawning the background daemon. That's success — keep polling
+        for the tunnel to come up.
+        """
         if self._process is None or self._process.poll() is None:
             return False
 
@@ -297,8 +302,13 @@ class NMPangolinService(dbus.service.Object):
                 stderr = self._process.stderr.read().decode("utf-8", errors="replace").strip()
             except Exception:
                 pass
-        log.error("pangolin exited with code %d: %s", rc, stderr)
         self._process = None
+
+        if rc == 0:
+            log.info("pangolin up exited 0 (detached mode), waiting for tunnel")
+            return False  # Keep polling — daemon is running in background
+
+        log.error("pangolin exited with code %d: %s", rc, stderr)
         self._poll_source = None
         self.Failure(dbus.UInt32(FAILURE_CONNECT_FAILED))
         self._set_state(STATE_STOPPED)

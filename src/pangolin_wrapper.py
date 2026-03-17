@@ -101,7 +101,7 @@ def start(
     args = ["up", "--silent"]
 
     if no_override_dns:
-        args.append("--no-override-dns")
+        args.append("--override-dns=false")
     if org is not None:
         args.extend(["--org", org])
     if iface is not None:

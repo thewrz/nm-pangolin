@@ -65,7 +65,7 @@ def test_start_basic(mock_pwnam):
 
         mock_popen.assert_called_once()
         cmd = mock_popen.call_args[0][0]
-        assert cmd == ["/usr/bin/pangolin", "up", "--silent", "--no-override-dns"]
+        assert cmd == ["/usr/bin/pangolin", "up", "--silent", "--override-dns=false"]
 
         env = mock_popen.call_args[1]["env"]
         assert env["HOME"] == "/home/testuser"
@@ -78,7 +78,7 @@ def test_start_with_all_options(mock_pwnam):
         wrapper.start("/usr/bin/pangolin", "testuser", org="myorg", iface="tun0", no_override_dns=True)
 
         cmd = mock_popen.call_args[0][0]
-        assert "--no-override-dns" in cmd
+        assert "--override-dns=false" in cmd
         assert "--org" in cmd
         assert "myorg" in cmd
         assert "--interface-name" in cmd
@@ -90,7 +90,7 @@ def test_start_without_dns_override(mock_pwnam):
         wrapper.start("/usr/bin/pangolin", "testuser", no_override_dns=False)
 
         cmd = mock_popen.call_args[0][0]
-        assert "--no-override-dns" not in cmd
+        assert "--override-dns=false" not in cmd
 
 
 # --- stop ---

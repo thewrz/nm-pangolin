@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """NetworkManager VPN plugin service for Pangolin.
 
 Implements the org.freedesktop.NetworkManager.VPN.Plugin D-Bus interface,

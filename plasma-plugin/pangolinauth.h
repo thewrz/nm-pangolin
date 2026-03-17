@@ -51,6 +51,7 @@ private:
     QString m_serverUrl;
     QString m_authBuffer;
     bool m_authenticated = false;
+    bool m_codeShown = false;
 };
 
 #endif // PANGOLINAUTH_H

@@ -203,11 +203,20 @@ class NMPangolinService(dbus.service.Object):
     def NeedSecrets(self, connection):
         """Check if pangolin auth is needed.
 
-        Returns empty string if authenticated, or a secret name if NM
-        should prompt the user via the Qt plugin's askUser() widget.
+        Returns empty string if authenticated or if the auth-token secret
+        has already been provided (meaning the auth widget completed).
+        Returns a secret name if NM should prompt the user.
         """
+        conn = dict(connection)
+
+        # If the auth widget already provided the secret, accept it
+        vpn_secrets = conn.get("vpn", {}).get("secrets", {})
+        if vpn_secrets.get("auth-token"):
+            log.info("NeedSecrets: auth-token secret provided, proceeding")
+            return ""
+
         try:
-            settings = config.parse_connection(dict(connection))
+            settings = config.parse_connection(conn)
         except config.ConfigError:
             return ""
 

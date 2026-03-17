@@ -23,23 +23,20 @@ PangolinWidget::PangolinWidget(const NetworkManager::VpnSetting::Ptr &setting, Q
 
     m_ui->warningLabel->setVisible(false);
 
-    connect(m_ui->serverUrl, &QLineEdit::textChanged, this, &SettingWidget::settingChanged);
-    connect(m_ui->org, &QLineEdit::textChanged, this, &SettingWidget::settingChanged);
-    connect(m_ui->interfaceName, &QLineEdit::textChanged, this, &SettingWidget::settingChanged);
-    connect(m_ui->mtu, &QSpinBox::valueChanged, this, &SettingWidget::settingChanged);
-    connect(m_ui->olmId, &QLineEdit::textChanged, this, &SettingWidget::settingChanged);
-    connect(m_ui->olmSecret, &QLineEdit::textChanged, this, &SettingWidget::settingChanged);
-
     checkPangolinBinary();
 
     if (setting && !setting->isNull()) {
         loadConfig(setting);
     }
 
+    // watchChangedSetting connects all child widgets to settingChanged.
+    // Must be called before the slotWidgetChanged connections below.
     watchChangedSetting();
 
-    // Emit initial validity state so the dialog knows we're valid
-    Q_EMIT validChanged(isValid());
+    // Connect the validity-driving field to slotWidgetChanged so that
+    // isValid() is re-evaluated and validChanged(bool) is emitted.
+    // This is what enables/disables the Save button.
+    connect(m_ui->serverUrl, &QLineEdit::textChanged, this, &SettingWidget::slotWidgetChanged);
 }
 
 PangolinWidget::~PangolinWidget()

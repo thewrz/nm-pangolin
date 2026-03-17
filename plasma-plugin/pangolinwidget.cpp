@@ -37,6 +37,9 @@ PangolinWidget::PangolinWidget(const NetworkManager::VpnSetting::Ptr &setting, Q
     }
 
     watchChangedSetting();
+
+    // Emit initial validity state so the dialog knows we're valid
+    Q_EMIT validChanged(isValid());
 }
 
 PangolinWidget::~PangolinWidget()

@@ -150,16 +150,6 @@ class NMPangolinService(dbus.service.Object):
         self._iface = settings["interface_name"]
         self._cancelling = False
 
-        # Check if the user is authenticated before attempting to connect.
-        # If not, tell NM we need secrets — this triggers the askUser()
-        # widget in the Qt plugin for device code enrollment.
-        if not wrapper.is_authenticated(self._pangolin_path, self._user):
-            log.info("User %s is not authenticated with pangolin", self._user)
-            self.Failure(dbus.UInt32(FAILURE_LOGIN_FAILED))
-            self._set_state(STATE_STOPPED)
-            self._schedule_idle_timeout()
-            return
-
         wrapper.cleanup_orphans(self._pangolin_path, self._iface)
 
         self._set_state(STATE_STARTING)
@@ -211,8 +201,22 @@ class NMPangolinService(dbus.service.Object):
 
     @dbus.service.method(VPN_IFACE, in_signature="a{sa{sv}}", out_signature="s")
     def NeedSecrets(self, connection):
-        """Return empty string -- pangolin handles its own auth."""
-        return ""
+        """Check if pangolin auth is needed.
+
+        Returns empty string if authenticated, or a secret name if NM
+        should prompt the user via the Qt plugin's askUser() widget.
+        """
+        try:
+            settings = config.parse_connection(dict(connection))
+        except config.ConfigError:
+            return ""
+
+        user = settings["user"]
+        if wrapper.is_authenticated(self._pangolin_path, user):
+            return ""
+
+        log.info("NeedSecrets: user %s not authenticated, requesting auth", user)
+        return "auth-token"
 
     @dbus.service.method(VPN_IFACE, in_signature="a{sa{sv}}", out_signature="")
     def NewSecrets(self, connection):

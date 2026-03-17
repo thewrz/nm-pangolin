@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.so
+*.o
+*.a
+
+# Distribution / packaging
+*.deb
+*.rpm
+*.pkg.tar.zst
+*.tar.gz
+
+# Test / coverage
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# Claude
+.claude/settings.local.json

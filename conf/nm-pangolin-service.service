@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=org.freedesktop.NetworkManager.pangolin
+Exec=/usr/lib/nm-pangolin/nm-pangolin-service
+User=root
+SystemdService=dbus-org.freedesktop.NetworkManager.pangolin.service

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "minimumReleaseAge": "7 days",
+  "automerge": false,
+  "dependencyDashboard": true,
+  "rangeStrategy": "bump",
+  "prConcurrentLimit": 3,
+  "prHourlyLimit": 2,
+  "labels": ["dependencies"],
+  "vulnerabilityAlerts": {
+    "labels": ["security"],
+    "minimumReleaseAge": "1 day"
+  },
+  "packageRules": [
+    {
+      "matchManagers": ["pep621"],
+      "groupName": "python-deps",
+      "automerge": false
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions",
+      "pinDigests": true,
+      "automerge": false
+    }
+  ]
+}

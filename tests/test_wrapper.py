@@ -256,3 +256,55 @@ def test_user_env_unknown_user():
 def test_run_as_user_cmd():
     cmd = wrapper._run_as_user_cmd("alice", "/usr/bin/pangolin", "up", "--silent")
     assert cmd == ["/usr/bin/pangolin", "up", "--silent"]
+
+
+# --- status: update-banner tolerance (CLI prints a banner on stdout) ---
+
+def test_status_json_after_update_banner(mock_pwnam):
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = (
+        b"A new version is available: 0.16.0 (current: 0.6.1)\n"
+        b"Run 'pangolin update' to update to the latest version\n\n"
+        + json.dumps({"status": "connected"}).encode()
+    )
+    with patch("pangolin_wrapper.subprocess.run", return_value=mock_result):
+        assert wrapper.status("/usr/bin/pangolin", "testuser") == {"status": "connected"}
+
+
+def test_status_banner_without_json(mock_pwnam):
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = (
+        b"A new version is available: 0.16.0 (current: 0.6.1)\n"
+        b"No client is currently running\n"
+    )
+    with patch("pangolin_wrapper.subprocess.run", return_value=mock_result):
+        assert wrapper.status("/usr/bin/pangolin", "testuser") is None
+
+
+# --- is_authenticated: exit code 0 does NOT mean authenticated ---
+
+def _auth_result(rc, stdout=b"", stderr=b""):
+    result = MagicMock()
+    result.returncode = rc
+    result.stdout = stdout
+    result.stderr = stderr
+    return result
+
+
+def test_is_authenticated_ok(mock_pwnam):
+    with patch("pangolin_wrapper.subprocess.run",
+               return_value=_auth_result(0, b"Logged in as user@example.com\n")):
+        assert wrapper.is_authenticated("/usr/bin/pangolin", "testuser") is True
+
+
+def test_is_authenticated_unauthorized_with_rc0(mock_pwnam):
+    with patch("pangolin_wrapper.subprocess.run",
+               return_value=_auth_result(0, b"Failed to fetch user data: Unauthorized\n")):
+        assert wrapper.is_authenticated("/usr/bin/pangolin", "testuser") is False
+
+
+def test_is_authenticated_nonzero_exit(mock_pwnam):
+    with patch("pangolin_wrapper.subprocess.run", return_value=_auth_result(1)):
+        assert wrapper.is_authenticated("/usr/bin/pangolin", "testuser") is False

@@ -427,3 +427,36 @@ def test_orphan_cleanup_on_startup(svc, mock_config, mock_wrapper):
     svc.Connect(_valid_connection())
 
     mock_wrapper.cleanup_orphans.assert_called_once_with("/usr/bin/pangolin", "pangolin")
+
+
+# --- auth surfacing ---
+
+def test_connect_unauthenticated_fails_with_login_failed(svc, mock_config, mock_wrapper):
+    """No usable CLI session -> LOGIN_FAILED before pangolin is even started."""
+    mock_wrapper.is_authenticated.return_value = False
+
+    svc.Connect(_valid_connection())
+
+    svc.Failure.assert_called_with(service.FAILURE_LOGIN_FAILED)
+    svc.StateChanged.assert_any_call(service.STATE_STOPPED)
+    mock_wrapper.start.assert_not_called()
+
+
+def test_poll_process_exited_unauthorized_is_login_failure(svc, mock_wrapper):
+    """'Unauthorized' in CLI output -> LOGIN_FAILED, not generic connect failure."""
+    proc = MagicMock()
+    proc.poll.return_value = 1
+    proc.returncode = 1
+    proc.stdout_tail = ["INFO: starting"]
+    proc.stderr_tail = ["Failed to ensure OLM credentials: failed to create OLM: Unauthorized"]
+    svc._process = proc
+    svc._state = STATE_STARTING
+    svc._connect_start = time.monotonic()
+    svc._server_url = "https://vpn.example.com"
+    svc._user = "testuser"
+
+    result = svc._poll_status()
+
+    assert result is False
+    svc.Failure.assert_called_with(service.FAILURE_LOGIN_FAILED)
+    svc.StateChanged.assert_any_call(service.STATE_STOPPED)

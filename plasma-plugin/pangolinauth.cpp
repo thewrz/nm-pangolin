@@ -78,7 +78,16 @@ void PangolinAuthWidget::checkAuthStatus()
     connect(process, &QProcess::finished, this, [this, process](int exitCode, QProcess::ExitStatus status) {
         process->deleteLater();
 
-        if (status != QProcess::NormalExit || exitCode != 0) {
+        // `pangolin auth status` exits 0 even when the session has expired
+        // ("Failed to fetch user data: Unauthorized") — the output text is
+        // authoritative, not the exit code.
+        const QString output = QString::fromUtf8(
+            process->readAllStandardOutput() + process->readAllStandardError());
+        const bool unauthenticated =
+            output.contains(QStringLiteral("Unauthorized"), Qt::CaseInsensitive)
+            || output.contains(QStringLiteral("not logged in"), Qt::CaseInsensitive);
+
+        if (status != QProcess::NormalExit || exitCode != 0 || unauthenticated) {
             startDeviceCodeFlow();
             return;
         }

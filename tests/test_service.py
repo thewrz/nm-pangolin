@@ -117,6 +117,11 @@ def mock_config():
 @pytest.fixture
 def mock_wrapper():
     with patch.object(service, "wrapper") as m:
+        m.AUTH_YES = "yes"
+        m.AUTH_NO = "no"
+        m.AUTH_UNKNOWN = "unknown"
+        m.UNAUTH_MARKERS = (b"unauthorized", b"not logged in", b"no account")
+        m.auth_state = MagicMock(return_value="yes")
         m.cleanup_orphans = MagicMock()
         m.start = MagicMock(return_value=MagicMock())
         m.stop = MagicMock()
@@ -432,8 +437,8 @@ def test_orphan_cleanup_on_startup(svc, mock_config, mock_wrapper):
 # --- auth surfacing ---
 
 def test_connect_unauthenticated_fails_with_login_failed(svc, mock_config, mock_wrapper):
-    """No usable CLI session -> LOGIN_FAILED before pangolin is even started."""
-    mock_wrapper.is_authenticated.return_value = False
+    """Positive no-session evidence -> LOGIN_FAILED before pangolin is even started."""
+    mock_wrapper.auth_state.return_value = "no"
 
     svc.Connect(_valid_connection())
 
@@ -460,3 +465,17 @@ def test_poll_process_exited_unauthorized_is_login_failure(svc, mock_wrapper):
     assert result is False
     svc.Failure.assert_called_with(service.FAILURE_LOGIN_FAILED)
     svc.StateChanged.assert_any_call(service.STATE_STOPPED)
+
+
+def test_connect_proceeds_when_auth_probe_inconclusive(svc, mock_config, mock_wrapper):
+    """AUTH_UNKNOWN (probe timeout / exec error) must NOT block the attempt."""
+    mock_wrapper.auth_state.return_value = "unknown"
+    proc = MagicMock()
+    proc.stdout = None
+    proc.stderr = None
+    mock_wrapper.start.return_value = proc
+
+    svc.Connect(_valid_connection())
+
+    mock_wrapper.start.assert_called_once()
+    svc.Failure.assert_not_called()

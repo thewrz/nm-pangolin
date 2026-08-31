@@ -156,10 +156,12 @@ class NMPangolinService(dbus.service.Object):
         self._server_url = settings.get("server_url") or ""
         self._cancelling = False
 
-        # Fail fast — and loudly — when the CLI has no usable session.
-        # Without this, `pangolin up` dies with a generic exit 1 and the
-        # user sees only "the VPN service stopped unexpectedly".
-        if not wrapper.is_authenticated(self._pangolin_path, self._user):
+        # Fail fast — and loudly — when the CLI positively has no usable
+        # session. Without this, `pangolin up` dies with a generic exit 1
+        # and the user sees only "the VPN service stopped unexpectedly".
+        # AUTH_UNKNOWN (probe timeout / exec error) proceeds: a transient
+        # probe failure must not be presented as bad credentials.
+        if wrapper.auth_state(self._pangolin_path, self._user) == wrapper.AUTH_NO:
             log.error(
                 "pangolin is NOT authenticated for user '%s' — the CLI login "
                 "was never run, or the session has expired. Fix: run "
@@ -240,7 +242,9 @@ class NMPangolinService(dbus.service.Object):
             return ""
 
         user = settings["user"]
-        if wrapper.is_authenticated(self._pangolin_path, user):
+        # Request the auth widget only on positive evidence of a missing
+        # session; AUTH_UNKNOWN must not block the connection attempt.
+        if wrapper.auth_state(self._pangolin_path, user) != wrapper.AUTH_NO:
             return ""
 
         log.info("NeedSecrets: user %s not authenticated, requesting auth", user)
@@ -314,6 +318,14 @@ class NMPangolinService(dbus.service.Object):
             return False
 
         rc = self._process.returncode
+        # Let the drain threads finish reading the final lines (EOF races
+        # poll()): without the join, a trailing "Unauthorized" can be missed
+        # and the failure misclassified as generic.
+        for thread in getattr(self._process, "drain_threads", ()) or ():
+            try:
+                thread.join(timeout=1.0)
+            except (RuntimeError, TypeError):
+                pass
         out_tail = _as_lines(getattr(self._process, "stdout_tail", None))
         err_tail = _as_lines(getattr(self._process, "stderr_tail", None))
         self._process = None
@@ -325,7 +337,7 @@ class NMPangolinService(dbus.service.Object):
         # Distinguish auth failure from every other failure: NM forwards
         # LOGIN_FAILED to the applet as a login problem, and the journal
         # names the exact recovery command.
-        if "unauthorized" in combined or "not logged in" in combined:
+        if any(marker.decode() in combined for marker in wrapper.UNAUTH_MARKERS):
             log.error(
                 "pangolin exited with code %d: AUTHENTICATION REJECTED — the "
                 "CLI login was never run, or the session has expired. Fix: "
@@ -449,12 +461,17 @@ class NMPangolinService(dbus.service.Object):
 
 
 def _as_lines(value) -> list[str]:
-    """Coerce a drain-tail deque into a list of strings; [] for anything else."""
+    """Coerce a drain-tail deque into a list of strings; [] for anything else.
+
+    RuntimeError covers a deque still being appended to by a drain thread
+    ("deque mutated during iteration") — the join above makes that rare,
+    but a wedged reader must not crash the GLib callback.
+    """
     if value is None:
         return []
     try:
         return [str(line) for line in value]
-    except TypeError:
+    except (TypeError, RuntimeError):
         return []
 
 

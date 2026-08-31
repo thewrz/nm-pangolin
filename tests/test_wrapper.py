@@ -61,6 +61,8 @@ def test_find_pangolin_not_found():
 
 def test_start_basic(mock_pwnam):
     with patch("pangolin_wrapper.subprocess.Popen") as mock_popen:
+        mock_popen.return_value.stdout = None
+        mock_popen.return_value.stderr = None
         proc = wrapper.start("/usr/bin/pangolin", "testuser")
 
         mock_popen.assert_called_once()
@@ -75,6 +77,8 @@ def test_start_basic(mock_pwnam):
 
 def test_start_with_all_options(mock_pwnam):
     with patch("pangolin_wrapper.subprocess.Popen") as mock_popen:
+        mock_popen.return_value.stdout = None
+        mock_popen.return_value.stderr = None
         wrapper.start("/usr/bin/pangolin", "testuser", org="myorg", iface="tun0", no_override_dns=True)
 
         cmd = mock_popen.call_args[0][0]
@@ -87,6 +91,8 @@ def test_start_with_all_options(mock_pwnam):
 
 def test_start_without_dns_override(mock_pwnam):
     with patch("pangolin_wrapper.subprocess.Popen") as mock_popen:
+        mock_popen.return_value.stdout = None
+        mock_popen.return_value.stderr = None
         wrapper.start("/usr/bin/pangolin", "testuser", no_override_dns=False)
 
         cmd = mock_popen.call_args[0][0]
@@ -308,3 +314,52 @@ def test_is_authenticated_unauthorized_with_rc0(mock_pwnam):
 def test_is_authenticated_nonzero_exit(mock_pwnam):
     with patch("pangolin_wrapper.subprocess.run", return_value=_auth_result(1)):
         assert wrapper.is_authenticated("/usr/bin/pangolin", "testuser") is False
+
+
+# --- auth_state tri-state ---
+
+def test_auth_state_yes(mock_pwnam):
+    with patch("pangolin_wrapper.subprocess.run",
+               return_value=_auth_result(0, b"Logged in as user@example.com\n")):
+        assert wrapper.auth_state("/usr/bin/pangolin", "testuser") == wrapper.AUTH_YES
+
+
+def test_auth_state_no_on_marker_even_with_rc0(mock_pwnam):
+    with patch("pangolin_wrapper.subprocess.run",
+               return_value=_auth_result(0, b"Failed to fetch user data: Unauthorized\n")):
+        assert wrapper.auth_state("/usr/bin/pangolin", "testuser") == wrapper.AUTH_NO
+
+
+def test_auth_state_unknown_on_timeout(mock_pwnam):
+    with patch("pangolin_wrapper.subprocess.run",
+               side_effect=subprocess.TimeoutExpired(cmd="auth", timeout=5)):
+        assert wrapper.auth_state("/usr/bin/pangolin", "testuser") == wrapper.AUTH_UNKNOWN
+
+
+def test_auth_state_unknown_on_unexpected_exit(mock_pwnam):
+    with patch("pangolin_wrapper.subprocess.run", return_value=_auth_result(2)):
+        assert wrapper.auth_state("/usr/bin/pangolin", "testuser") == wrapper.AUTH_UNKNOWN
+
+
+# --- status: raw_decode robustness ---
+
+def test_status_json_with_braces_in_banner_and_trailing_text(mock_pwnam):
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = (
+        b"note {beta} build available\n"
+        + json.dumps({"status": "connected"}).encode()
+        + b"\ntrailing diagnostics line\n"
+    )
+    with patch("pangolin_wrapper.subprocess.run", return_value=mock_result):
+        assert wrapper.status("/usr/bin/pangolin", "testuser") == {"status": "connected"}
+
+
+# --- drain threads on a real process ---
+
+def test_start_drains_real_process_output(mock_pwnam):
+    proc = wrapper.start("/bin/echo", "testuser")
+    proc.wait(timeout=5)
+    for thread in proc.drain_threads:
+        thread.join(timeout=5)
+    assert any("--attach" in line for line in proc.stdout_tail)

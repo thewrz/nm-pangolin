@@ -18,7 +18,15 @@ log = logging.getLogger(__name__)
 # Text markers meaning "the CLI has no usable session". Checked against
 # combined stdout+stderr because `pangolin auth status` exits 0 even when
 # the session is expired (it prints "Failed to fetch user data: Unauthorized").
+# Keep in sync with outputLooksUnauthenticated in plasma-plugin/pangolinauth.cpp.
 UNAUTH_MARKERS = (b"unauthorized", b"not logged in", b"no account")
+
+# auth_state() results. AUTH_NO requires positive evidence (a marker above);
+# probe timeouts and execution errors are AUTH_UNKNOWN, never AUTH_NO, so a
+# transient failure is not misreported to the user as bad credentials.
+AUTH_YES = "yes"
+AUTH_NO = "no"
+AUTH_UNKNOWN = "unknown"
 
 # How many trailing output lines to keep per stream for diagnostics.
 OUTPUT_TAIL_LINES = 60
@@ -134,16 +142,26 @@ def start(
     # lifetime of the tunnel; an unread PIPE buffer fills (~64KB) and then
     # blocks the tunnel process mid-session. The tails also give the service
     # real diagnostics when the process exits.
-    proc.stdout_tail = _spawn_drain(proc.stdout)
-    proc.stderr_tail = _spawn_drain(proc.stderr)
+    try:
+        proc.stdout_tail, out_thread = _spawn_drain(proc.stdout)
+        proc.stderr_tail, err_thread = _spawn_drain(proc.stderr)
+    except RuntimeError as exc:
+        # Thread startup failed: don't leak a live, untracked tunnel process.
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        raise OSError(f"could not start pipe-drain threads: {exc}") from exc
+    proc.drain_threads = tuple(t for t in (out_thread, err_thread) if t is not None)
     return proc
 
 
-def _spawn_drain(stream) -> deque:
+def _spawn_drain(stream) -> tuple[deque, "threading.Thread | None"]:
     """Read *stream* to EOF on a daemon thread, keeping the last lines."""
     tail: deque = deque(maxlen=OUTPUT_TAIL_LINES)
     if stream is None:
-        return tail
+        return tail, None
 
     def _drain():
         try:
@@ -157,8 +175,9 @@ def _spawn_drain(stream) -> deque:
             except OSError:
                 pass
 
-    threading.Thread(target=_drain, daemon=True).start()
-    return tail
+    thread = threading.Thread(target=_drain, daemon=True)
+    thread.start()
+    return tail, thread
 
 
 def stop(pangolin_path: str, user: str, timeout: int = 10) -> None:
@@ -186,12 +205,14 @@ def stop(pangolin_path: str, user: str, timeout: int = 10) -> None:
         log.warning("pangolin down exited %d: %s", result.returncode, stderr)
 
 
-def is_authenticated(pangolin_path: str, user: str, timeout: int = 5) -> bool:
-    """Check if the user is authenticated with pangolin.
+def auth_state(pangolin_path: str, user: str, timeout: int = 5) -> str:
+    """Classify the CLI auth state: AUTH_YES, AUTH_NO, or AUTH_UNKNOWN.
 
     The exit code alone is NOT trustworthy: `pangolin auth status` exits 0
     even when the session has expired, printing "Failed to fetch user data:
-    Unauthorized" instead. The output text is authoritative.
+    Unauthorized" instead. The output text is authoritative. AUTH_NO is
+    returned only on positive evidence; anything inconclusive (timeout,
+    exec error, unexpected exit) is AUTH_UNKNOWN.
     """
     cmd = _run_as_user_cmd(user, pangolin_path, "auth", "status")
     env = _user_env(user)
@@ -207,12 +228,19 @@ def is_authenticated(pangolin_path: str, user: str, timeout: int = 5) -> bool:
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
         log.warning("pangolin auth status check failed: %s", exc)
-        return False
+        return AUTH_UNKNOWN
 
-    if result.returncode != 0:
-        return False
     output = (result.stdout + result.stderr).lower()
-    return not any(marker in output for marker in UNAUTH_MARKERS)
+    if any(marker in output for marker in UNAUTH_MARKERS):
+        return AUTH_NO
+    if result.returncode == 0:
+        return AUTH_YES
+    return AUTH_UNKNOWN
+
+
+def is_authenticated(pangolin_path: str, user: str, timeout: int = 5) -> bool:
+    """True only when auth_state() has positive evidence of a session."""
+    return auth_state(pangolin_path, user, timeout=timeout) == AUTH_YES
 
 
 def status(
@@ -243,20 +271,24 @@ def status(
         log.debug("pangolin status exited %d", result.returncode)
         return None
 
-    stdout = result.stdout.strip()
     # The CLI prints an update-notice banner on stdout ahead of the JSON
-    # payload whenever a newer release exists, so parse from the first
-    # brace instead of requiring the payload to start the stream.
-    start = stdout.find(b"{")
-    if start < 0:
-        log.debug("pangolin status: not connected yet")
-        return None
+    # payload whenever a newer release exists. raw_decode from each brace
+    # candidate tolerates both leading text (braces in the banner included)
+    # and trailing text after the object.
+    text = result.stdout.decode("utf-8", errors="replace")
+    decoder = json.JSONDecoder()
+    idx = text.find("{")
+    while idx != -1:
+        try:
+            obj, _ = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            obj = None
+        if isinstance(obj, dict):
+            return obj
+        idx = text.find("{", idx + 1)
 
-    try:
-        return json.loads(stdout[start:])
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        log.warning("Failed to parse pangolin status JSON: %s", exc)
-        return None
+    log.debug("pangolin status: no JSON object in output")
+    return None
 
 
 def get_interface_config(iface: str = "pangolin") -> dict:

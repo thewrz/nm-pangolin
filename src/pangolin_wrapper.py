@@ -39,50 +39,55 @@ class PangolinNotFoundError(Exception):
     """Raised when the pangolin binary cannot be located."""
 
 
-def _untrusted_reason(path: str) -> str | None:
-    """Why root must not execute *path*; None when it is safe to.
+def _untrusted_reason(real: str) -> str | None:
+    """Why root must not execute *real*; None when it is safe to.
+
+    *real* must already be symlink-resolved, and is the exact path that will
+    be executed -- resolving again afterwards could land somewhere else.
 
     The service runs as root and launches this binary as root, so it has to
     be one that only root can replace: a regular file owned by root and not
     world-writable, reached through directories that are the same. A copy
     under a home directory fails this by definition -- whoever owns it could
-    swap it and get root at the next connect.
+    swap it and get root at the next connect. Every component is lstat'ed,
+    so a link that appears in the resolved path is rejected, not followed.
 
     Group-writable is tolerated: a root-owned system directory with an admin
     group (Debian ships /usr/local as root:staff 2775) is the distribution's
     own trust decision.
     """
-    current = os.path.realpath(path)
-    try:
-        st = os.stat(current)
-    except OSError as exc:
-        return f"{current}: {exc.strerror or exc}"
-    if not stat.S_ISREG(st.st_mode):
-        return f"{current} is not a regular file"
-    if not os.access(current, os.X_OK):
-        return f"{current} is not executable"
-
+    current = real
+    is_binary = True
     while True:
+        try:
+            st = os.lstat(current)
+        except OSError as exc:
+            return f"{current}: {exc.strerror or exc}"
+        if stat.S_ISLNK(st.st_mode):
+            return f"{current} is a symlink"
+        if is_binary and not stat.S_ISREG(st.st_mode):
+            return f"{current} is not a regular file"
         if st.st_uid != 0:
             return f"{current} is owned by uid {st.st_uid}, not root"
         if st.st_mode & stat.S_IWOTH:
             return f"{current} is world-writable"
+        if is_binary and not os.access(current, os.X_OK):
+            return f"{current} is not executable"
+        is_binary = False
         parent = os.path.dirname(current)
         if parent == current:
             return None
         current = parent
-        try:
-            st = os.stat(current)
-        except OSError as exc:
-            return f"{current}: {exc.strerror or exc}"
 
 
 def find_pangolin() -> str:
     """Locate a pangolin binary that root may execute.
 
-    Checks PATH via shutil.which, then the system locations. Candidates that
-    exist but could be replaced by a non-root user are skipped (see
-    _untrusted_reason) and named in the error if nothing better is found.
+    Checks PATH via shutil.which, then the system locations. Each candidate
+    is resolved once and that resolved path is both what gets validated (see
+    _untrusted_reason) and what is returned. Candidates that exist but could
+    be replaced by a non-root user are skipped and named in the error if
+    nothing better is found.
 
     Returns:
         Absolute, symlink-resolved path to the pangolin binary.
@@ -98,21 +103,21 @@ def find_pangolin() -> str:
 
     rejected = []
     for path in candidates:
+        real = os.path.realpath(path)
         try:
-            os.stat(path)
+            os.lstat(real)
         except OSError:
             continue
-        reason = _untrusted_reason(path)
+        reason = _untrusted_reason(real)
         if reason is None:
-            return os.path.realpath(path)
+            return real
         rejected.append(f"{path}: {reason}")
 
     if rejected:
         raise PangolinNotFoundError(
             "no pangolin binary that root may execute ("
             + "; ".join(rejected)
-            + "). Install it root-owned at /usr/local/bin/pangolin -- "
-            "install.sh does this."
+            + "). Install one root-owned, e.g. at /usr/local/bin/pangolin."
         )
     raise PangolinNotFoundError(
         "pangolin binary not found in PATH or system locations"

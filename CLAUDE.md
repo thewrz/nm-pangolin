@@ -82,7 +82,7 @@ pangolin status [--json]
 
 - The D-Bus service runs as root (NM launches it via D-Bus activation)
 - `pangolin` CLI runs as root with the connecting user's HOME/XDG_CONFIG_HOME env vars so it finds the right auth state
-- Because it runs as root, the service only launches a pangolin binary that root alone can replace: root-owned, not world-writable, in root-owned directories (`find_pangolin`). A copy in `~/.local/bin` is rejected; `install.sh` installs a root-owned copy at `/usr/local/bin/pangolin` instead of the symlink it used to create
+- Because it runs as root, the service only launches a pangolin binary that root alone can replace: root-owned, not world-writable, in root-owned directories (`find_pangolin`). A copy in `~/.local/bin` is rejected, and `install.sh` neither symlinks nor copies it into a system path (that would launder a user-writable file into a trusted one) — install a verified release at `/usr/local/bin/pangolin`
 - D-Bus policy file restricts who can call our methods (only root/NM)
 
 ## Testing

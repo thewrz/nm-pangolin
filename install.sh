@@ -109,41 +109,38 @@ prompt_install() {
 
 # --- Check pangolin CLI ---
 # The NM service launches pangolin as root and refuses any binary a non-root
-# user could replace (see _untrusted_reason in pangolin_wrapper.py). A copy
-# under a home directory is therefore installed root-owned into
-# /usr/local/bin rather than symlinked, which is what this script used to do.
+# user could replace (see _untrusted_reason in pangolin_wrapper.py). This
+# script used to symlink /usr/local/bin/pangolin at a copy in a home
+# directory; it no longer adopts such a copy at all -- copying it into a
+# root-owned path would make root trust a file that any process of that user
+# could have replaced beforehand.
 
 PANGOLIN_PATH=""
-
-# Check system PATH (resolving symlinks: an old install left one pointing home)
 if command -v pangolin &>/dev/null; then
     PANGOLIN_PATH="$(readlink -f "$(command -v pangolin)")"
 fi
 
-# Check common user-local installs
-if [[ -z "$PANGOLIN_PATH" || ! -x "$PANGOLIN_PATH" ]]; then
-    PANGOLIN_PATH=""
-    for home_dir in /home/*; do
-        candidate="$home_dir/.local/bin/pangolin"
-        if [[ -x "$candidate" ]]; then
-            PANGOLIN_PATH="$candidate"
-            break
-        fi
-    done
-fi
+USER_PANGOLIN=""
+for home_dir in /home/*; do
+    if [[ -x "$home_dir/.local/bin/pangolin" ]]; then
+        USER_PANGOLIN="$home_dir/.local/bin/pangolin"
+        break
+    fi
+done
 
-if [[ -z "$PANGOLIN_PATH" ]]; then
-    echo "Warning: pangolin CLI not found."
-    echo "The VPN service requires the pangolin binary to function."
-    echo "Install it before attempting to connect (AUR: pangolin-bin, or manual install)."
+if [[ -n "$PANGOLIN_PATH" && "$PANGOLIN_PATH" != /home/* ]]; then
+    :   # system-wide install; the service checks its ownership when it starts
+elif [[ -n "$USER_PANGOLIN" || -n "$PANGOLIN_PATH" ]]; then
+    echo "Warning: pangolin is only installed in a home directory (${USER_PANGOLIN:-$PANGOLIN_PATH})."
+    echo "The VPN service runs it as root and will only execute a root-owned binary."
+    echo "Download a release you have verified and install it system-wide, e.g.:"
+    echo "  sudo install -m 755 ./pangolin-cli_linux_amd64 /usr/local/bin/pangolin"
     echo ""
-elif [[ "$PANGOLIN_PATH" == /home/* ]]; then
-    echo "Found pangolin at $PANGOLIN_PATH (user-local install)."
-    echo "The NM service runs pangolin as root and only executes a root-owned binary."
-    echo "Installing a root-owned copy: /usr/local/bin/pangolin"
-    rm -f /usr/local/bin/pangolin
-    install -D -o root -g root -m 755 "$PANGOLIN_PATH" /usr/local/bin/pangolin
-    echo "After 'pangolin update', re-run this script (or update the system copy as root)."
+else
+    echo "Warning: pangolin CLI not found."
+    echo "The VPN service requires a root-owned pangolin binary to function."
+    echo "Install it before attempting to connect (AUR: pangolin-bin, or a verified"
+    echo "release binary at /usr/local/bin/pangolin)."
     echo ""
 fi
 

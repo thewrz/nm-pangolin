@@ -35,19 +35,19 @@ ROOT_BIN = (0, stat.S_IFREG | 0o755)
 
 
 def _fake_fs(entries, links=None):
-    """Patch stat/realpath/access/which-independent lookups from a table of
-    path -> (uid, mode). Unlisted paths do not exist."""
+    """Patch lstat/realpath/access from a table of path -> (uid, mode).
+    Unlisted paths do not exist; *links* maps a path to what it resolves to."""
     links = links or {}
 
-    def fake_stat(path, *args, **kwargs):
-        path = links.get(os.fspath(path), os.fspath(path))
+    def fake_lstat(path, *args, **kwargs):
+        path = os.fspath(path)
         if path not in entries:
             raise FileNotFoundError(2, "No such file or directory", path)
         uid, mode = entries[path]
         return os.stat_result((mode, 0, 0, 1, uid, 0, 0, 0, 0, 0))
 
     return (
-        patch("pangolin_wrapper.os.stat", side_effect=fake_stat),
+        patch("pangolin_wrapper.os.lstat", side_effect=fake_lstat),
         patch("pangolin_wrapper.os.path.realpath", side_effect=lambda p: links.get(p, p)),
         patch("pangolin_wrapper.os.access", return_value=True),
     )
@@ -113,6 +113,27 @@ def test_find_pangolin_skips_untrusted_for_a_trusted_one():
           "/home/u/pangolin": (1000, stat.S_IFREG | 0o755),
           "/usr/bin/pangolin": ROOT_BIN}
     assert _find(fs, which="/home/u/pangolin") == "/usr/bin/pangolin"
+
+
+def test_find_pangolin_returns_exactly_the_path_it_validated():
+    """Resolve once: a second resolution could land somewhere else if a link
+    in the chain is swapped between the check and the use."""
+    fs = {**SYSTEM, "/usr/bin/pangolin": ROOT_BIN}
+    resolutions = iter(["/usr/bin/pangolin", "/home/u/evil"])
+    lstat_p, _, access_p = _fake_fs(fs)
+    with lstat_p, access_p, \
+         patch("pangolin_wrapper.shutil.which", return_value="/home/u/bin/pangolin"), \
+         patch("pangolin_wrapper.os.path.realpath", side_effect=lambda p: next(resolutions)) as real:
+        assert wrapper.find_pangolin() == "/usr/bin/pangolin"
+        assert real.call_count == 1
+
+
+def test_find_pangolin_rejects_symlink_in_resolved_path():
+    """A resolved path has no links in it; one showing up means it changed
+    underneath the check, and lstat must not follow it to something trusted."""
+    fs = {**SYSTEM, "/opt": (0, stat.S_IFLNK | 0o777), "/opt/pangolin": ROOT_BIN}
+    with pytest.raises(PangolinNotFoundError, match="/opt is a symlink"):
+        _find(fs, which="/opt/pangolin")
 
 
 def test_find_pangolin_not_found():

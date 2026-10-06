@@ -1,6 +1,7 @@
 """Tests for pangolin_wrapper module."""
 
 import json
+import stat
 import subprocess
 from unittest.mock import MagicMock, patch, call
 
@@ -26,35 +27,97 @@ def mock_pwnam():
 
 
 # --- find_pangolin ---
+# The service runs as root, so it only launches a binary that nothing but root
+# can replace. A fake stat table stands in for the filesystem.
+
+ROOT_DIR = (0, stat.S_IFDIR | 0o755)
+ROOT_BIN = (0, stat.S_IFREG | 0o755)
+
+
+def _fake_fs(entries, links=None):
+    """Patch stat/realpath/access/which-independent lookups from a table of
+    path -> (uid, mode). Unlisted paths do not exist."""
+    links = links or {}
+
+    def fake_stat(path, *args, **kwargs):
+        path = links.get(os.fspath(path), os.fspath(path))
+        if path not in entries:
+            raise FileNotFoundError(2, "No such file or directory", path)
+        uid, mode = entries[path]
+        return os.stat_result((mode, 0, 0, 1, uid, 0, 0, 0, 0, 0))
+
+    return (
+        patch("pangolin_wrapper.os.stat", side_effect=fake_stat),
+        patch("pangolin_wrapper.os.path.realpath", side_effect=lambda p: links.get(p, p)),
+        patch("pangolin_wrapper.os.access", return_value=True),
+    )
+
+
+def _find(entries, which, links=None):
+    stat_p, real_p, access_p = _fake_fs(entries, links)
+    with stat_p, real_p, access_p, \
+         patch("pangolin_wrapper.shutil.which", return_value=which):
+        return wrapper.find_pangolin()
+
+
+SYSTEM = {"/": ROOT_DIR, "/usr": ROOT_DIR, "/usr/bin": ROOT_DIR,
+          "/usr/local": ROOT_DIR, "/usr/local/bin": ROOT_DIR}
+
 
 def test_find_pangolin_via_which():
-    with patch("pangolin_wrapper.shutil.which", return_value="/usr/bin/pangolin"), \
-         patch("pangolin_wrapper.os.path.realpath", return_value="/usr/bin/pangolin"):
-        assert wrapper.find_pangolin() == "/usr/bin/pangolin"
+    fs = {**SYSTEM, "/usr/bin/pangolin": ROOT_BIN}
+    assert _find(fs, which="/usr/bin/pangolin") == "/usr/bin/pangolin"
 
 
 def test_find_pangolin_fallback_paths():
-    with patch("pangolin_wrapper.shutil.which", return_value=None), \
-         patch("pangolin_wrapper._user_local_paths", return_value=[]), \
-         patch("pangolin_wrapper.os.path.isfile", side_effect=lambda p: p == "/usr/bin/pangolin"), \
-         patch("pangolin_wrapper.os.access", return_value=True):
-        assert wrapper.find_pangolin() == "/usr/bin/pangolin"
+    fs = {**SYSTEM, "/usr/local/bin/pangolin": ROOT_BIN}
+    assert _find(fs, which=None) == "/usr/local/bin/pangolin"
 
 
-def test_find_pangolin_user_local():
-    with patch("pangolin_wrapper.shutil.which", return_value=None), \
-         patch("pangolin_wrapper._user_local_paths", return_value=["/home/testuser/.local/bin/pangolin"]), \
-         patch("pangolin_wrapper.os.path.isfile", side_effect=lambda p: p == "/home/testuser/.local/bin/pangolin"), \
-         patch("pangolin_wrapper.os.access", return_value=True):
-        assert wrapper.find_pangolin() == "/home/testuser/.local/bin/pangolin"
+def test_find_pangolin_rejects_symlink_into_home():
+    """The old install symlinked /usr/local/bin/pangolin at the user's copy:
+    anything running as that user could then run code as root."""
+    fs = {**SYSTEM, "/home": ROOT_DIR, "/home/u": (1000, stat.S_IFDIR | 0o700),
+          "/home/u/.local": (1000, stat.S_IFDIR | 0o755),
+          "/home/u/.local/bin": (1000, stat.S_IFDIR | 0o755),
+          "/home/u/.local/bin/pangolin": (1000, stat.S_IFREG | 0o755)}
+    links = {"/usr/local/bin/pangolin": "/home/u/.local/bin/pangolin"}
+    with pytest.raises(PangolinNotFoundError, match="owned by uid 1000, not root"):
+        _find(fs, which="/usr/local/bin/pangolin", links=links)
+
+
+def test_find_pangolin_rejects_user_writable_directory():
+    """A root-owned file is still replaceable if its directory is not root's."""
+    fs = {**SYSTEM, "/opt": ROOT_DIR, "/opt/tools": (1000, stat.S_IFDIR | 0o755),
+          "/opt/tools/pangolin": ROOT_BIN}
+    with pytest.raises(PangolinNotFoundError, match="/opt/tools is owned by uid 1000"):
+        _find(fs, which="/opt/tools/pangolin")
+
+
+def test_find_pangolin_rejects_world_writable():
+    fs = {**SYSTEM, "/usr/bin/pangolin": (0, stat.S_IFREG | 0o757)}
+    with pytest.raises(PangolinNotFoundError, match="world-writable"):
+        _find(fs, which="/usr/bin/pangolin")
+
+
+def test_find_pangolin_accepts_admin_group_writable_directory():
+    """Debian ships /usr/local as root:staff 2775; that is the distribution's
+    own trust decision, not a user-writable path."""
+    fs = {**SYSTEM, "/usr/local/bin": (0, stat.S_IFDIR | 0o2775),
+          "/usr/local/bin/pangolin": ROOT_BIN}
+    assert _find(fs, which="/usr/local/bin/pangolin") == "/usr/local/bin/pangolin"
+
+
+def test_find_pangolin_skips_untrusted_for_a_trusted_one():
+    fs = {**SYSTEM, "/home": ROOT_DIR, "/home/u": (1000, stat.S_IFDIR | 0o755),
+          "/home/u/pangolin": (1000, stat.S_IFREG | 0o755),
+          "/usr/bin/pangolin": ROOT_BIN}
+    assert _find(fs, which="/home/u/pangolin") == "/usr/bin/pangolin"
 
 
 def test_find_pangolin_not_found():
-    with patch("pangolin_wrapper.shutil.which", return_value=None), \
-         patch("pangolin_wrapper._user_local_paths", return_value=[]), \
-         patch("pangolin_wrapper.os.path.isfile", return_value=False):
-        with pytest.raises(PangolinNotFoundError):
-            wrapper.find_pangolin()
+    with pytest.raises(PangolinNotFoundError, match="not found"):
+        _find(dict(SYSTEM), which=None)
 
 
 # --- start ---

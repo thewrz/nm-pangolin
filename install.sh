@@ -108,16 +108,21 @@ prompt_install() {
 }
 
 # --- Check pangolin CLI ---
+# The NM service launches pangolin as root and refuses any binary a non-root
+# user could replace (see _untrusted_reason in pangolin_wrapper.py). A copy
+# under a home directory is therefore installed root-owned into
+# /usr/local/bin rather than symlinked, which is what this script used to do.
 
 PANGOLIN_PATH=""
 
-# Check system PATH
+# Check system PATH (resolving symlinks: an old install left one pointing home)
 if command -v pangolin &>/dev/null; then
-    PANGOLIN_PATH="$(command -v pangolin)"
+    PANGOLIN_PATH="$(readlink -f "$(command -v pangolin)")"
 fi
 
 # Check common user-local installs
-if [[ -z "$PANGOLIN_PATH" ]]; then
+if [[ -z "$PANGOLIN_PATH" || ! -x "$PANGOLIN_PATH" ]]; then
+    PANGOLIN_PATH=""
     for home_dir in /home/*; do
         candidate="$home_dir/.local/bin/pangolin"
         if [[ -x "$candidate" ]]; then
@@ -132,19 +137,13 @@ if [[ -z "$PANGOLIN_PATH" ]]; then
     echo "The VPN service requires the pangolin binary to function."
     echo "Install it before attempting to connect (AUR: pangolin-bin, or manual install)."
     echo ""
-elif [[ "$PANGOLIN_PATH" == /home/*/.local/bin/* ]]; then
+elif [[ "$PANGOLIN_PATH" == /home/* ]]; then
     echo "Found pangolin at $PANGOLIN_PATH (user-local install)."
-    echo "The NM service runs as root and needs pangolin in a system path."
-
-    if [[ ! -e /usr/local/bin/pangolin ]]; then
-        echo "Creating symlink: /usr/local/bin/pangolin -> $PANGOLIN_PATH"
-        ln -sf "$PANGOLIN_PATH" /usr/local/bin/pangolin
-    elif [[ -L /usr/local/bin/pangolin ]]; then
-        echo "Updating symlink: /usr/local/bin/pangolin -> $PANGOLIN_PATH"
-        ln -sf "$PANGOLIN_PATH" /usr/local/bin/pangolin
-    else
-        echo "Note: /usr/local/bin/pangolin already exists (not a symlink). Skipping."
-    fi
+    echo "The NM service runs pangolin as root and only executes a root-owned binary."
+    echo "Installing a root-owned copy: /usr/local/bin/pangolin"
+    rm -f /usr/local/bin/pangolin
+    install -D -o root -g root -m 755 "$PANGOLIN_PATH" /usr/local/bin/pangolin
+    echo "After 'pangolin update', re-run this script (or update the system copy as root)."
     echo ""
 fi
 

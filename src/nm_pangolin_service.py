@@ -533,8 +533,8 @@ def main():
 
     try:
         pangolin_path = wrapper.find_pangolin()
-    except wrapper.PangolinNotFoundError:
-        log.critical("pangolin binary not found -- cannot start service")
+    except wrapper.PangolinNotFoundError as exc:
+        log.critical("%s -- cannot start service", exc)
         sys.exit(1)
 
     bus = dbus.SystemBus()

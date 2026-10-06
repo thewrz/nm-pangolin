@@ -9,6 +9,7 @@ import logging
 import os
 import pwd
 import shutil
+import stat
 import subprocess
 import threading
 from collections import deque
@@ -38,39 +39,83 @@ class PangolinNotFoundError(Exception):
     """Raised when the pangolin binary cannot be located."""
 
 
-def _user_local_paths() -> list[str]:
-    """Return ~/.local/bin/pangolin paths for all real (non-system) users."""
-    paths = []
-    for pw in pwd.getpwall():
-        if pw.pw_uid >= 1000 and pw.pw_dir and os.path.isdir(pw.pw_dir):
-            candidate = os.path.join(pw.pw_dir, ".local", "bin", "pangolin")
-            paths.append(candidate)
-    return paths
+def _untrusted_reason(path: str) -> str | None:
+    """Why root must not execute *path*; None when it is safe to.
+
+    The service runs as root and launches this binary as root, so it has to
+    be one that only root can replace: a regular file owned by root and not
+    world-writable, reached through directories that are the same. A copy
+    under a home directory fails this by definition -- whoever owns it could
+    swap it and get root at the next connect.
+
+    Group-writable is tolerated: a root-owned system directory with an admin
+    group (Debian ships /usr/local as root:staff 2775) is the distribution's
+    own trust decision.
+    """
+    current = os.path.realpath(path)
+    try:
+        st = os.stat(current)
+    except OSError as exc:
+        return f"{current}: {exc.strerror or exc}"
+    if not stat.S_ISREG(st.st_mode):
+        return f"{current} is not a regular file"
+    if not os.access(current, os.X_OK):
+        return f"{current} is not executable"
+
+    while True:
+        if st.st_uid != 0:
+            return f"{current} is owned by uid {st.st_uid}, not root"
+        if st.st_mode & stat.S_IWOTH:
+            return f"{current} is world-writable"
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+        try:
+            st = os.stat(current)
+        except OSError as exc:
+            return f"{current}: {exc.strerror or exc}"
 
 
 def find_pangolin() -> str:
-    """Locate the pangolin binary on the system.
+    """Locate a pangolin binary that root may execute.
 
-    Checks PATH via shutil.which, then system locations, then
-    ~/.local/bin/ for all real users (common for user-local installs).
+    Checks PATH via shutil.which, then the system locations. Candidates that
+    exist but could be replaced by a non-root user are skipped (see
+    _untrusted_reason) and named in the error if nothing better is found.
 
     Returns:
-        Absolute path to the pangolin binary.
+        Absolute, symlink-resolved path to the pangolin binary.
 
     Raises:
-        PangolinNotFoundError: If the binary is not found anywhere.
+        PangolinNotFoundError: If no trustworthy binary is found.
     """
+    candidates = []
     found = shutil.which("pangolin")
     if found is not None:
-        return os.path.realpath(found)
+        candidates.append(found)
+    candidates.extend(p for p in _SYSTEM_PATHS if p not in candidates)
 
-    for path in _SYSTEM_PATHS + _user_local_paths():
-        if os.path.isfile(path) and os.access(path, os.X_OK):
-            log.info("Found pangolin at %s", path)
-            return path
+    rejected = []
+    for path in candidates:
+        try:
+            os.stat(path)
+        except OSError:
+            continue
+        reason = _untrusted_reason(path)
+        if reason is None:
+            return os.path.realpath(path)
+        rejected.append(f"{path}: {reason}")
 
+    if rejected:
+        raise PangolinNotFoundError(
+            "no pangolin binary that root may execute ("
+            + "; ".join(rejected)
+            + "). Install it root-owned at /usr/local/bin/pangolin -- "
+            "install.sh does this."
+        )
     raise PangolinNotFoundError(
-        "pangolin binary not found in PATH, system locations, or ~/.local/bin/"
+        "pangolin binary not found in PATH or system locations"
     )
 
 

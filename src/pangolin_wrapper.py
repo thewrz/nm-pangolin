@@ -9,9 +9,28 @@ import logging
 import os
 import pwd
 import shutil
+import stat
 import subprocess
+import threading
+from collections import deque
 
 log = logging.getLogger(__name__)
+
+# Text markers meaning "the CLI has no usable session". Checked against
+# combined stdout+stderr because `pangolin auth status` exits 0 even when
+# the session is expired (it prints "Failed to fetch user data: Unauthorized").
+# Keep in sync with outputLooksUnauthenticated in plasma-plugin/pangolinauth.cpp.
+UNAUTH_MARKERS = (b"unauthorized", b"not logged in", b"no account")
+
+# auth_state() results. AUTH_NO requires positive evidence (a marker above);
+# probe timeouts and execution errors are AUTH_UNKNOWN, never AUTH_NO, so a
+# transient failure is not misreported to the user as bad credentials.
+AUTH_YES = "yes"
+AUTH_NO = "no"
+AUTH_UNKNOWN = "unknown"
+
+# How many trailing output lines to keep per stream for diagnostics.
+OUTPUT_TAIL_LINES = 60
 
 _SYSTEM_PATHS = ["/usr/bin/pangolin", "/usr/local/bin/pangolin"]
 
@@ -20,39 +39,88 @@ class PangolinNotFoundError(Exception):
     """Raised when the pangolin binary cannot be located."""
 
 
-def _user_local_paths() -> list[str]:
-    """Return ~/.local/bin/pangolin paths for all real (non-system) users."""
-    paths = []
-    for pw in pwd.getpwall():
-        if pw.pw_uid >= 1000 and pw.pw_dir and os.path.isdir(pw.pw_dir):
-            candidate = os.path.join(pw.pw_dir, ".local", "bin", "pangolin")
-            paths.append(candidate)
-    return paths
+def _untrusted_reason(real: str) -> str | None:
+    """Why root must not execute *real*; None when it is safe to.
+
+    *real* must already be symlink-resolved, and is the exact path that will
+    be executed -- resolving again afterwards could land somewhere else.
+
+    The service runs as root and launches this binary as root, so it has to
+    be one that only root can replace: a regular file owned by root and not
+    world-writable, reached through directories that are the same. A copy
+    under a home directory fails this by definition -- whoever owns it could
+    swap it and get root at the next connect. Every component is lstat'ed,
+    so a link that appears in the resolved path is rejected, not followed.
+
+    Group-writable is tolerated: a root-owned system directory with an admin
+    group (Debian ships /usr/local as root:staff 2775) is the distribution's
+    own trust decision.
+    """
+    current = real
+    is_binary = True
+    while True:
+        try:
+            st = os.lstat(current)
+        except OSError as exc:
+            return f"{current}: {exc.strerror or exc}"
+        if stat.S_ISLNK(st.st_mode):
+            return f"{current} is a symlink"
+        if is_binary and not stat.S_ISREG(st.st_mode):
+            return f"{current} is not a regular file"
+        if st.st_uid != 0:
+            return f"{current} is owned by uid {st.st_uid}, not root"
+        if st.st_mode & stat.S_IWOTH:
+            return f"{current} is world-writable"
+        if is_binary and not os.access(current, os.X_OK):
+            return f"{current} is not executable"
+        is_binary = False
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
 
 
 def find_pangolin() -> str:
-    """Locate the pangolin binary on the system.
+    """Locate a pangolin binary that root may execute.
 
-    Checks PATH via shutil.which, then system locations, then
-    ~/.local/bin/ for all real users (common for user-local installs).
+    Checks PATH via shutil.which, then the system locations. Each candidate
+    is resolved once and that resolved path is both what gets validated (see
+    _untrusted_reason) and what is returned. Candidates that exist but could
+    be replaced by a non-root user are skipped and named in the error if
+    nothing better is found.
 
     Returns:
-        Absolute path to the pangolin binary.
+        Absolute, symlink-resolved path to the pangolin binary.
 
     Raises:
-        PangolinNotFoundError: If the binary is not found anywhere.
+        PangolinNotFoundError: If no trustworthy binary is found.
     """
+    candidates = []
     found = shutil.which("pangolin")
     if found is not None:
-        return os.path.realpath(found)
+        candidates.append(found)
+    candidates.extend(p for p in _SYSTEM_PATHS if p not in candidates)
 
-    for path in _SYSTEM_PATHS + _user_local_paths():
-        if os.path.isfile(path) and os.access(path, os.X_OK):
-            log.info("Found pangolin at %s", path)
-            return path
+    rejected = []
+    for path in candidates:
+        real = os.path.realpath(path)
+        try:
+            os.lstat(real)
+        except OSError:
+            continue
+        reason = _untrusted_reason(real)
+        if reason is None:
+            return real
+        rejected.append(f"{path}: {reason}")
 
+    if rejected:
+        raise PangolinNotFoundError(
+            "no pangolin binary that root may execute ("
+            + "; ".join(rejected)
+            + "). Install one root-owned, e.g. at /usr/local/bin/pangolin."
+        )
     raise PangolinNotFoundError(
-        "pangolin binary not found in PATH, system locations, or ~/.local/bin/"
+        "pangolin binary not found in PATH or system locations"
     )
 
 
@@ -112,7 +180,7 @@ def start(
 
     log.info("Starting pangolin: %s (env: HOME=%s USER=%s)", " ".join(cmd), env.get("HOME"), env.get("USER"))
 
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -120,6 +188,46 @@ def start(
         close_fds=True,
         start_new_session=True,
     )
+    # Drain both pipes continuously. In --attach mode pangolin logs for the
+    # lifetime of the tunnel; an unread PIPE buffer fills (~64KB) and then
+    # blocks the tunnel process mid-session. The tails also give the service
+    # real diagnostics when the process exits.
+    try:
+        proc.stdout_tail, out_thread = _spawn_drain(proc.stdout)
+        proc.stderr_tail, err_thread = _spawn_drain(proc.stderr)
+    except RuntimeError as exc:
+        # Thread startup failed: don't leak a live, untracked tunnel process.
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        raise OSError(f"could not start pipe-drain threads: {exc}") from exc
+    proc.drain_threads = tuple(t for t in (out_thread, err_thread) if t is not None)
+    return proc
+
+
+def _spawn_drain(stream) -> tuple[deque, "threading.Thread | None"]:
+    """Read *stream* to EOF on a daemon thread, keeping the last lines."""
+    tail: deque = deque(maxlen=OUTPUT_TAIL_LINES)
+    if stream is None:
+        return tail, None
+
+    def _drain():
+        try:
+            for line in iter(stream.readline, b""):
+                tail.append(line.decode("utf-8", errors="replace").rstrip())
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    thread = threading.Thread(target=_drain, daemon=True)
+    thread.start()
+    return tail, thread
 
 
 def stop(pangolin_path: str, user: str, timeout: int = 10) -> None:
@@ -147,8 +255,15 @@ def stop(pangolin_path: str, user: str, timeout: int = 10) -> None:
         log.warning("pangolin down exited %d: %s", result.returncode, stderr)
 
 
-def is_authenticated(pangolin_path: str, user: str, timeout: int = 5) -> bool:
-    """Check if the user is authenticated with pangolin."""
+def auth_state(pangolin_path: str, user: str, timeout: int = 5) -> str:
+    """Classify the CLI auth state: AUTH_YES, AUTH_NO, or AUTH_UNKNOWN.
+
+    The exit code alone is NOT trustworthy: `pangolin auth status` exits 0
+    even when the session has expired, printing "Failed to fetch user data:
+    Unauthorized" instead. The output text is authoritative. AUTH_NO is
+    returned only on positive evidence; anything inconclusive (timeout,
+    exec error, unexpected exit) is AUTH_UNKNOWN.
+    """
     cmd = _run_as_user_cmd(user, pangolin_path, "auth", "status")
     env = _user_env(user)
 
@@ -161,10 +276,21 @@ def is_authenticated(pangolin_path: str, user: str, timeout: int = 5) -> bool:
             close_fds=True,
             timeout=timeout,
         )
-        return result.returncode == 0
     except (subprocess.TimeoutExpired, OSError) as exc:
         log.warning("pangolin auth status check failed: %s", exc)
-        return False
+        return AUTH_UNKNOWN
+
+    output = (result.stdout + result.stderr).lower()
+    if any(marker in output for marker in UNAUTH_MARKERS):
+        return AUTH_NO
+    if result.returncode == 0:
+        return AUTH_YES
+    return AUTH_UNKNOWN
+
+
+def is_authenticated(pangolin_path: str, user: str, timeout: int = 5) -> bool:
+    """True only when auth_state() has positive evidence of a session."""
+    return auth_state(pangolin_path, user, timeout=timeout) == AUTH_YES
 
 
 def status(
@@ -195,16 +321,24 @@ def status(
         log.debug("pangolin status exited %d", result.returncode)
         return None
 
-    stdout = result.stdout.strip()
-    if not stdout or not stdout.startswith(b"{"):
-        log.debug("pangolin status: not connected yet")
-        return None
+    # The CLI prints an update-notice banner on stdout ahead of the JSON
+    # payload whenever a newer release exists. raw_decode from each brace
+    # candidate tolerates both leading text (braces in the banner included)
+    # and trailing text after the object.
+    text = result.stdout.decode("utf-8", errors="replace")
+    decoder = json.JSONDecoder()
+    idx = text.find("{")
+    while idx != -1:
+        try:
+            obj, _ = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            obj = None
+        if isinstance(obj, dict):
+            return obj
+        idx = text.find("{", idx + 1)
 
-    try:
-        return json.loads(stdout)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        log.warning("Failed to parse pangolin status JSON: %s", exc)
-        return None
+    log.debug("pangolin status: no JSON object in output")
+    return None
 
 
 def get_interface_config(iface: str = "pangolin") -> dict:

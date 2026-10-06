@@ -14,6 +14,17 @@ static constexpr int k_pollIntervalMs = 2000;
 static constexpr int k_defaultExpirySeconds = 600;
 static constexpr int k_autoCloseSeconds = 5;
 
+// `pangolin auth status` exits 0 even when there is no usable session
+// ("Failed to fetch user data: Unauthorized") — the output text is
+// authoritative, not the exit code. Keep these markers in sync with
+// UNAUTH_MARKERS in src/pangolin_wrapper.py.
+static bool outputLooksUnauthenticated(const QString &output)
+{
+    return output.contains(QStringLiteral("Unauthorized"), Qt::CaseInsensitive)
+        || output.contains(QStringLiteral("not logged in"), Qt::CaseInsensitive)
+        || output.contains(QStringLiteral("no account"), Qt::CaseInsensitive);
+}
+
 static QString pangolinBinaryPath()
 {
     QString path = QStandardPaths::findExecutable(QStringLiteral("pangolin"));
@@ -78,7 +89,11 @@ void PangolinAuthWidget::checkAuthStatus()
     connect(process, &QProcess::finished, this, [this, process](int exitCode, QProcess::ExitStatus status) {
         process->deleteLater();
 
-        if (status != QProcess::NormalExit || exitCode != 0) {
+        const QString output = QString::fromUtf8(
+            process->readAllStandardOutput() + process->readAllStandardError());
+
+        if (status != QProcess::NormalExit || exitCode != 0
+            || outputLooksUnauthenticated(output)) {
             startDeviceCodeFlow();
             return;
         }
@@ -205,7 +220,13 @@ void PangolinAuthWidget::pollAuthStatus()
     connect(process, &QProcess::finished, this, [this, process](int exitCode, QProcess::ExitStatus status) {
         process->deleteLater();
 
-        if (status != QProcess::NormalExit || exitCode != 0) {
+        // Exit 0 is NOT proof of success (see outputLooksUnauthenticated) —
+        // without the text check the first poll would claim authentication
+        // and kill the still-pending device-code login.
+        const QString output = QString::fromUtf8(
+            process->readAllStandardOutput() + process->readAllStandardError());
+        if (status != QProcess::NormalExit || exitCode != 0
+            || outputLooksUnauthenticated(output)) {
             return;
         }
 

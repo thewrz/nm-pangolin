@@ -1,6 +1,7 @@
 """Tests for pangolin_wrapper module."""
 
 import json
+import stat
 import subprocess
 from unittest.mock import MagicMock, patch, call
 
@@ -26,41 +27,126 @@ def mock_pwnam():
 
 
 # --- find_pangolin ---
+# The service runs as root, so it only launches a binary that nothing but root
+# can replace. A fake stat table stands in for the filesystem.
+
+ROOT_DIR = (0, stat.S_IFDIR | 0o755)
+ROOT_BIN = (0, stat.S_IFREG | 0o755)
+
+
+def _fake_fs(entries, links=None):
+    """Patch lstat/realpath/access from a table of path -> (uid, mode).
+    Unlisted paths do not exist; *links* maps a path to what it resolves to."""
+    links = links or {}
+
+    def fake_lstat(path, *args, **kwargs):
+        path = os.fspath(path)
+        if path not in entries:
+            raise FileNotFoundError(2, "No such file or directory", path)
+        uid, mode = entries[path]
+        return os.stat_result((mode, 0, 0, 1, uid, 0, 0, 0, 0, 0))
+
+    return (
+        patch("pangolin_wrapper.os.lstat", side_effect=fake_lstat),
+        patch("pangolin_wrapper.os.path.realpath", side_effect=lambda p: links.get(p, p)),
+        patch("pangolin_wrapper.os.access", return_value=True),
+    )
+
+
+def _find(entries, which, links=None):
+    stat_p, real_p, access_p = _fake_fs(entries, links)
+    with stat_p, real_p, access_p, \
+         patch("pangolin_wrapper.shutil.which", return_value=which):
+        return wrapper.find_pangolin()
+
+
+SYSTEM = {"/": ROOT_DIR, "/usr": ROOT_DIR, "/usr/bin": ROOT_DIR,
+          "/usr/local": ROOT_DIR, "/usr/local/bin": ROOT_DIR}
+
 
 def test_find_pangolin_via_which():
-    with patch("pangolin_wrapper.shutil.which", return_value="/usr/bin/pangolin"), \
-         patch("pangolin_wrapper.os.path.realpath", return_value="/usr/bin/pangolin"):
-        assert wrapper.find_pangolin() == "/usr/bin/pangolin"
+    fs = {**SYSTEM, "/usr/bin/pangolin": ROOT_BIN}
+    assert _find(fs, which="/usr/bin/pangolin") == "/usr/bin/pangolin"
 
 
 def test_find_pangolin_fallback_paths():
-    with patch("pangolin_wrapper.shutil.which", return_value=None), \
-         patch("pangolin_wrapper._user_local_paths", return_value=[]), \
-         patch("pangolin_wrapper.os.path.isfile", side_effect=lambda p: p == "/usr/bin/pangolin"), \
-         patch("pangolin_wrapper.os.access", return_value=True):
+    fs = {**SYSTEM, "/usr/local/bin/pangolin": ROOT_BIN}
+    assert _find(fs, which=None) == "/usr/local/bin/pangolin"
+
+
+def test_find_pangolin_rejects_symlink_into_home():
+    """The old install symlinked /usr/local/bin/pangolin at the user's copy:
+    anything running as that user could then run code as root."""
+    fs = {**SYSTEM, "/home": ROOT_DIR, "/home/u": (1000, stat.S_IFDIR | 0o700),
+          "/home/u/.local": (1000, stat.S_IFDIR | 0o755),
+          "/home/u/.local/bin": (1000, stat.S_IFDIR | 0o755),
+          "/home/u/.local/bin/pangolin": (1000, stat.S_IFREG | 0o755)}
+    links = {"/usr/local/bin/pangolin": "/home/u/.local/bin/pangolin"}
+    with pytest.raises(PangolinNotFoundError, match="owned by uid 1000, not root"):
+        _find(fs, which="/usr/local/bin/pangolin", links=links)
+
+
+def test_find_pangolin_rejects_user_writable_directory():
+    """A root-owned file is still replaceable if its directory is not root's."""
+    fs = {**SYSTEM, "/opt": ROOT_DIR, "/opt/tools": (1000, stat.S_IFDIR | 0o755),
+          "/opt/tools/pangolin": ROOT_BIN}
+    with pytest.raises(PangolinNotFoundError, match="/opt/tools is owned by uid 1000"):
+        _find(fs, which="/opt/tools/pangolin")
+
+
+def test_find_pangolin_rejects_world_writable():
+    fs = {**SYSTEM, "/usr/bin/pangolin": (0, stat.S_IFREG | 0o757)}
+    with pytest.raises(PangolinNotFoundError, match="world-writable"):
+        _find(fs, which="/usr/bin/pangolin")
+
+
+def test_find_pangolin_accepts_admin_group_writable_directory():
+    """Debian ships /usr/local as root:staff 2775; that is the distribution's
+    own trust decision, not a user-writable path."""
+    fs = {**SYSTEM, "/usr/local/bin": (0, stat.S_IFDIR | 0o2775),
+          "/usr/local/bin/pangolin": ROOT_BIN}
+    assert _find(fs, which="/usr/local/bin/pangolin") == "/usr/local/bin/pangolin"
+
+
+def test_find_pangolin_skips_untrusted_for_a_trusted_one():
+    fs = {**SYSTEM, "/home": ROOT_DIR, "/home/u": (1000, stat.S_IFDIR | 0o755),
+          "/home/u/pangolin": (1000, stat.S_IFREG | 0o755),
+          "/usr/bin/pangolin": ROOT_BIN}
+    assert _find(fs, which="/home/u/pangolin") == "/usr/bin/pangolin"
+
+
+def test_find_pangolin_returns_exactly_the_path_it_validated():
+    """Resolve once: a second resolution could land somewhere else if a link
+    in the chain is swapped between the check and the use."""
+    fs = {**SYSTEM, "/usr/bin/pangolin": ROOT_BIN}
+    resolutions = iter(["/usr/bin/pangolin", "/home/u/evil"])
+    lstat_p, _, access_p = _fake_fs(fs)
+    with lstat_p, access_p, \
+         patch("pangolin_wrapper.shutil.which", return_value="/home/u/bin/pangolin"), \
+         patch("pangolin_wrapper.os.path.realpath", side_effect=lambda p: next(resolutions)) as real:
         assert wrapper.find_pangolin() == "/usr/bin/pangolin"
+        assert real.call_count == 1
 
 
-def test_find_pangolin_user_local():
-    with patch("pangolin_wrapper.shutil.which", return_value=None), \
-         patch("pangolin_wrapper._user_local_paths", return_value=["/home/testuser/.local/bin/pangolin"]), \
-         patch("pangolin_wrapper.os.path.isfile", side_effect=lambda p: p == "/home/testuser/.local/bin/pangolin"), \
-         patch("pangolin_wrapper.os.access", return_value=True):
-        assert wrapper.find_pangolin() == "/home/testuser/.local/bin/pangolin"
+def test_find_pangolin_rejects_symlink_in_resolved_path():
+    """A resolved path has no links in it; one showing up means it changed
+    underneath the check, and lstat must not follow it to something trusted."""
+    fs = {**SYSTEM, "/opt": (0, stat.S_IFLNK | 0o777), "/opt/pangolin": ROOT_BIN}
+    with pytest.raises(PangolinNotFoundError, match="/opt is a symlink"):
+        _find(fs, which="/opt/pangolin")
 
 
 def test_find_pangolin_not_found():
-    with patch("pangolin_wrapper.shutil.which", return_value=None), \
-         patch("pangolin_wrapper._user_local_paths", return_value=[]), \
-         patch("pangolin_wrapper.os.path.isfile", return_value=False):
-        with pytest.raises(PangolinNotFoundError):
-            wrapper.find_pangolin()
+    with pytest.raises(PangolinNotFoundError, match="not found"):
+        _find(dict(SYSTEM), which=None)
 
 
 # --- start ---
 
 def test_start_basic(mock_pwnam):
     with patch("pangolin_wrapper.subprocess.Popen") as mock_popen:
+        mock_popen.return_value.stdout = None
+        mock_popen.return_value.stderr = None
         proc = wrapper.start("/usr/bin/pangolin", "testuser")
 
         mock_popen.assert_called_once()
@@ -75,6 +161,8 @@ def test_start_basic(mock_pwnam):
 
 def test_start_with_all_options(mock_pwnam):
     with patch("pangolin_wrapper.subprocess.Popen") as mock_popen:
+        mock_popen.return_value.stdout = None
+        mock_popen.return_value.stderr = None
         wrapper.start("/usr/bin/pangolin", "testuser", org="myorg", iface="tun0", no_override_dns=True)
 
         cmd = mock_popen.call_args[0][0]
@@ -87,6 +175,8 @@ def test_start_with_all_options(mock_pwnam):
 
 def test_start_without_dns_override(mock_pwnam):
     with patch("pangolin_wrapper.subprocess.Popen") as mock_popen:
+        mock_popen.return_value.stdout = None
+        mock_popen.return_value.stderr = None
         wrapper.start("/usr/bin/pangolin", "testuser", no_override_dns=False)
 
         cmd = mock_popen.call_args[0][0]
@@ -256,3 +346,104 @@ def test_user_env_unknown_user():
 def test_run_as_user_cmd():
     cmd = wrapper._run_as_user_cmd("alice", "/usr/bin/pangolin", "up", "--silent")
     assert cmd == ["/usr/bin/pangolin", "up", "--silent"]
+
+
+# --- status: update-banner tolerance (CLI prints a banner on stdout) ---
+
+def test_status_json_after_update_banner(mock_pwnam):
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = (
+        b"A new version is available: 0.16.0 (current: 0.6.1)\n"
+        b"Run 'pangolin update' to update to the latest version\n\n"
+        + json.dumps({"status": "connected"}).encode()
+    )
+    with patch("pangolin_wrapper.subprocess.run", return_value=mock_result):
+        assert wrapper.status("/usr/bin/pangolin", "testuser") == {"status": "connected"}
+
+
+def test_status_banner_without_json(mock_pwnam):
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = (
+        b"A new version is available: 0.16.0 (current: 0.6.1)\n"
+        b"No client is currently running\n"
+    )
+    with patch("pangolin_wrapper.subprocess.run", return_value=mock_result):
+        assert wrapper.status("/usr/bin/pangolin", "testuser") is None
+
+
+# --- is_authenticated: exit code 0 does NOT mean authenticated ---
+
+def _auth_result(rc, stdout=b"", stderr=b""):
+    result = MagicMock()
+    result.returncode = rc
+    result.stdout = stdout
+    result.stderr = stderr
+    return result
+
+
+def test_is_authenticated_ok(mock_pwnam):
+    with patch("pangolin_wrapper.subprocess.run",
+               return_value=_auth_result(0, b"Logged in as user@example.com\n")):
+        assert wrapper.is_authenticated("/usr/bin/pangolin", "testuser") is True
+
+
+def test_is_authenticated_unauthorized_with_rc0(mock_pwnam):
+    with patch("pangolin_wrapper.subprocess.run",
+               return_value=_auth_result(0, b"Failed to fetch user data: Unauthorized\n")):
+        assert wrapper.is_authenticated("/usr/bin/pangolin", "testuser") is False
+
+
+def test_is_authenticated_nonzero_exit(mock_pwnam):
+    with patch("pangolin_wrapper.subprocess.run", return_value=_auth_result(1)):
+        assert wrapper.is_authenticated("/usr/bin/pangolin", "testuser") is False
+
+
+# --- auth_state tri-state ---
+
+def test_auth_state_yes(mock_pwnam):
+    with patch("pangolin_wrapper.subprocess.run",
+               return_value=_auth_result(0, b"Logged in as user@example.com\n")):
+        assert wrapper.auth_state("/usr/bin/pangolin", "testuser") == wrapper.AUTH_YES
+
+
+def test_auth_state_no_on_marker_even_with_rc0(mock_pwnam):
+    with patch("pangolin_wrapper.subprocess.run",
+               return_value=_auth_result(0, b"Failed to fetch user data: Unauthorized\n")):
+        assert wrapper.auth_state("/usr/bin/pangolin", "testuser") == wrapper.AUTH_NO
+
+
+def test_auth_state_unknown_on_timeout(mock_pwnam):
+    with patch("pangolin_wrapper.subprocess.run",
+               side_effect=subprocess.TimeoutExpired(cmd="auth", timeout=5)):
+        assert wrapper.auth_state("/usr/bin/pangolin", "testuser") == wrapper.AUTH_UNKNOWN
+
+
+def test_auth_state_unknown_on_unexpected_exit(mock_pwnam):
+    with patch("pangolin_wrapper.subprocess.run", return_value=_auth_result(2)):
+        assert wrapper.auth_state("/usr/bin/pangolin", "testuser") == wrapper.AUTH_UNKNOWN
+
+
+# --- status: raw_decode robustness ---
+
+def test_status_json_with_braces_in_banner_and_trailing_text(mock_pwnam):
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = (
+        b"note {beta} build available\n"
+        + json.dumps({"status": "connected"}).encode()
+        + b"\ntrailing diagnostics line\n"
+    )
+    with patch("pangolin_wrapper.subprocess.run", return_value=mock_result):
+        assert wrapper.status("/usr/bin/pangolin", "testuser") == {"status": "connected"}
+
+
+# --- drain threads on a real process ---
+
+def test_start_drains_real_process_output(mock_pwnam):
+    proc = wrapper.start("/bin/echo", "testuser")
+    proc.wait(timeout=5)
+    for thread in proc.drain_threads:
+        thread.join(timeout=5)
+    assert any("--attach" in line for line in proc.stdout_tail)
